@@ -17,6 +17,9 @@ import { AgentSession } from './session.ts';
 import { collabTransport, type AgentTransport } from './transport.ts';
 import type { SessionRequest, SessionResult, SessionTask } from './types.ts';
 
+/** router 注入：把一次 SessionRequest 换成自己的长期 Turn 实现。 */
+export type SessionTaskFactory = (request: SessionRequest) => SessionTask;
+
 export type AgentRuntimeOptions = {
   agentId: string;
   definition: EmbeddedAgentDefinition;
@@ -25,6 +28,8 @@ export type AgentRuntimeOptions = {
   rootBase?: string;
   /** 测试替身：跳过模型适配器与密钥解析。 */
   brain?: Brain;
+  /** router 的长期 Turn 实现；缺省走 AgentSession / ProcessSession。 */
+  sessionTaskFactory?: SessionTaskFactory;
 };
 
 export type CollabRuntimeOptions = {
@@ -46,6 +51,7 @@ export class AgentRuntime {
   readonly rootBase: string | undefined;
 
   private brainInstance: Brain | null;
+  private readonly taskFactory: SessionTaskFactory | undefined;
   private specsCache: ToolSpec[] | null = null;
   private running = 0;
   private presence = 0;
@@ -58,6 +64,7 @@ export class AgentRuntime {
     this.root = root;
     this.rootBase = options.rootBase;
     this.brainInstance = options.brain ?? null;
+    this.taskFactory = options.sessionTaskFactory;
   }
 
   static async create(options: AgentRuntimeOptions): Promise<AgentRuntime> {
@@ -153,6 +160,7 @@ export class AgentRuntime {
    * `runSession` 与 `session.ts` 入口保持 inline，避免子进程再套子进程。
    */
   createSessionTask(request: SessionRequest): SessionTask {
+    if (this.taskFactory) return this.taskFactory(request);
     const isolation = request.definition?.sessionIsolation ?? this.isolation;
     return isolation === 'process' ? new ProcessSession(this, request) : this.createSession(request);
   }

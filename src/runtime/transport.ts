@@ -35,6 +35,10 @@ export type MailboxPort = {
   ack(messageId: string, deliveryId: string): Promise<void>;
   nack(messageId: string, input: { deliveryId: string; retryAfterSeconds?: number; reason?: string }): Promise<void>;
   close(sessionId: string): Promise<void>;
+  /** 长期信箱：重启后继续同一 session；不支持的传输层可以省略。 */
+  resume?(sessionKey: string, signal?: AbortSignal): Promise<void>;
+  renew?(sessionId: string, leaseSeconds: number): Promise<void>;
+  pending?(sessionId?: string): number;
 };
 
 export type RunLedgerPort = {

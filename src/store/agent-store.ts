@@ -309,8 +309,23 @@ export class AgentStore {
     return kept.reverse();
   }
 
-  deleteMessagesOlderThan(threadId: string, keep: number): number {
-    const result = this.db.run(
+  firstMessage(threadId: string): MessageRow | undefined {
+    return this.db.get<MessageRow>(
+      'SELECT * FROM messages WHERE thread_id = ? ORDER BY rowid ASC LIMIT 1',
+      threadId,
+    );
+  }
+
+  countMessages(threadId: string): number {
+    return Number(
+      this.db.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?',
+        threadId,
+      )?.count ?? 0,
+    );
+  }
+
+  deleteMessagesOlderThan(threadId: string, keep: number): number {    const result = this.db.run(
       `DELETE FROM messages WHERE thread_id = ? AND rowid NOT IN (
         SELECT rowid FROM messages WHERE thread_id = ? ORDER BY rowid DESC LIMIT ?
       )`,
