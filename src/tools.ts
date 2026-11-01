@@ -10,6 +10,10 @@ import { CollabError } from './client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from './definition.ts';
 import type { ToolCall, ToolSpec } from './brains/types.ts';
 import type { ToolBackend } from './runtime/transport.ts';
+import { ANP_TOOL_SPECS } from './tools/anp.ts';
+import { NET_TOOL_SPECS } from './tools/net.ts';
+import { SCHEDULE_TOOL_SPECS } from './tools/schedule.ts';
+import { SUBAGENT_TOOL_SPECS } from './tools/subagent.ts';
 import {
   listFilesInside,
   readBytesInside,
@@ -196,6 +200,10 @@ export const TOOL_SPECS: Record<EmbeddedTool, ToolSpec> = {
       },
     }, ['summary']),
   },
+  ...ANP_TOOL_SPECS,
+  ...SUBAGENT_TOOL_SPECS,
+  ...SCHEDULE_TOOL_SPECS,
+  ...NET_TOOL_SPECS,
 };
 
 function textOf(input: Record<string, unknown>, key: string, max = 20_000): string {
@@ -401,6 +409,21 @@ export function createTools(options: ToolOptions) {
               outcome: typeof input.outcome === 'string' ? input.outcome : 'done',
             },
           };
+        case 'anp_send':
+        case 'anp_reply':
+        case 'anp_list_messages':
+        case 'anp_get_message':
+        case 'list_agents':
+        case 'agent_status':
+        case 'spawn_agent':
+        case 'schedule_create':
+        case 'schedule_cancel':
+        case 'list_schedules':
+        case 'http_fetch':
+        case 'memory_get':
+        case 'memory_set':
+        case 'finish_turn':
+          return { content: `工具 ${call.name} 只在 router 常驻模式下可用` };
         default:
           return { content: `未知工具 ${call.name}` };
       }

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import type { AnpSigningIdentity } from '@anpio-cli/core';
 import type { Brain } from '../brains/types.ts';
 import type { EmbeddedAgentDefinition } from '../definition.ts';
+import { isLocalTool, isRouterTool } from '../definition.ts';
 import { AnpClient, type AnpPayload } from '../anp/client.ts';
 import { loadOrCreateIdentity, writeAgentJson, type ServiceEndpoints } from '../anp/identity.ts';
 import { AgentRuntime } from '../runtime/agent.ts';
@@ -35,11 +36,24 @@ export type AgentHostOptions = {
   /** 测试替身；缺省按 provider 构造。 */
   brain?: Brain;
   /** 重载定义后重建 Brain；缺省沿用 brain 或 provider。 */
-  brainFactory?: (definition: EmbeddedAgentDefinition) => Brain;
+  brainFactory?: (definition: EmbeddedAgentDefinition) => Brain | undefined;
   maxActiveTurns: number;
   sweepIntervalMs?: number;
   now?: () => number;
-  toolFactory?: (input: { runDir: string; turnId: string; definition: EmbeddedAgentDefinition }) => BrainLoopTools;
+  /** 子 agent 把 workspace 放在父的 workspace/subagents 下。 */
+  workspaceBase?: string;
+  toolFactory?: (input: {
+    runDir: string;
+    turnId: string;
+    definition: EmbeddedAgentDefinition;
+    threadId: string;
+    triggerMessageId: string | null;
+    store: AgentStore;
+    mailbox: AnpMailbox;
+    markReplied: () => void;
+    agentId: string;
+    entry: AgentEntry;
+  }) => BrainLoopTools;
 };
 
 function anpTransport(): AgentTransport {
@@ -105,6 +119,10 @@ export class AgentHost {
     return this.entry.definition;
   }
 
+  get anpConfig(): AgentEntry['anp'] {
+    return this.entry.anp;
+  }
+
   get identity(): AnpSigningIdentity {
     if (!this.signingIdentity) throw new Error(`agent ${this.agentId} 尚未启动`);
     return this.signingIdentity;
@@ -133,6 +151,12 @@ export class AgentHost {
 
   async start(): Promise<void> {
     const endpoints = this.options.endpoints;
+    const unsupported = this.entry.definition.tools.filter(tool => !isLocalTool(tool) && !isRouterTool(tool));
+    if (unsupported.length > 0) {
+      throw new Error(
+        `agent ${this.agentId} 定义了 router 不提供的工具：${unsupported.join(', ')}`,
+      );
+    }
     const identity = await loadOrCreateIdentity(this.directory, endpoints, this.agentId);
     this.signingIdentity = identity;
     this.store = new AgentStore(join(this.directory, 'agent.db'));
@@ -264,7 +288,7 @@ export class AgentHost {
       agentId: this.agentId,
       definition,
       transport: anpTransport(),
-      rootBase: join(this.options.root, 'agents'),
+      rootBase: this.options.workspaceBase ?? join(this.options.root, 'agents'),
       ...(brain ? { brain } : {}),
     });
   }
@@ -371,6 +395,7 @@ export class AgentHost {
       runId,
       log: (level, text) => this.log(`[${this.agentId}] ${level}: ${text}`),
     });
+    const toolFactory = this.options.toolFactory;
     const task = new AnpTurnSession({
       runtime,
       definition: this.entry.definition,
@@ -382,7 +407,15 @@ export class AgentHost {
       runId,
       threadId,
       triggerMessageId: trigger?.message_id ?? null,
-      ...(this.options.toolFactory ? { toolFactory: this.options.toolFactory } : {}),
+      ...(toolFactory
+        ? {
+            toolFactory: toolInput => toolFactory({
+              ...toolInput,
+              agentId: this.agentId,
+              entry: this.entry,
+            }),
+          }
+        : {}),
     });
     this.tasks.set(threadId, task);
     let result: SessionResult | null = null;

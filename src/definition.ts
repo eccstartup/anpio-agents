@@ -39,6 +39,20 @@ export const EMBEDDED_TOOLS = [
   'write_file',
   'list_files',
   'finish',
+  'anp_send',
+  'anp_reply',
+  'anp_list_messages',
+  'anp_get_message',
+  'list_agents',
+  'agent_status',
+  'spawn_agent',
+  'schedule_create',
+  'schedule_cancel',
+  'list_schedules',
+  'http_fetch',
+  'memory_get',
+  'memory_set',
+  'finish_turn',
 ] as const;
 
 export type EmbeddedTool = (typeof EMBEDDED_TOOLS)[number];
@@ -46,8 +60,30 @@ export type EmbeddedTool = (typeof EMBEDDED_TOOLS)[number];
 /** 执行引擎自己提供的工具，不依赖任何控制面。 */
 export const LOCAL_TOOLS = ['shell', 'read_file', 'write_file', 'list_files', 'finish'] as const;
 
+/** 常驻 router 才有的协作工具；进程内的 AgentHost 负责提供。 */
+export const ROUTER_TOOLS = [
+  'anp_send',
+  'anp_reply',
+  'anp_list_messages',
+  'anp_get_message',
+  'list_agents',
+  'agent_status',
+  'spawn_agent',
+  'schedule_create',
+  'schedule_cancel',
+  'list_schedules',
+  'http_fetch',
+  'memory_get',
+  'memory_set',
+  'finish_turn',
+] as const;
+
 export function isLocalTool(tool: EmbeddedTool): boolean {
   return (LOCAL_TOOLS as readonly string[]).includes(tool);
+}
+
+export function isRouterTool(tool: EmbeddedTool): boolean {
+  return (ROUTER_TOOLS as readonly string[]).includes(tool);
 }
 
 export const COMPLETION_POLICIES = ['finish', 'text'] as const;

@@ -288,6 +288,10 @@ export class AgentStore {
     ).reverse();
   }
 
+  getMessage(messageId: string): MessageRow | undefined {
+    return this.db.get<MessageRow>('SELECT * FROM messages WHERE message_id = ?', messageId);
+  }
+
   /** 历史预算：保留最近 maxMessages 条 / maxBytes 字节；返回按时间正序的行。 */
   history(threadId: string, options: { maxMessages?: number; maxBytes?: number } = {}): MessageRow[] {
     const maxMessages = options.maxMessages ?? 60;

@@ -33,6 +33,10 @@ export type RouterConfig = {
   watchIntervalMs: number;
   /** 扫描待处理消息、重试 outbox 的间隔。 */
   sweepIntervalMs: number;
+  /** 扫描过期子 agent 的间隔；0 表示关闭。 */
+  childScanIntervalMs: number;
+  /** 定时调度 tick 间隔；0 表示不自动触发。 */
+  scheduleTickIntervalMs: number;
 };
 
 type Raw = Record<string, unknown>;
@@ -44,6 +48,8 @@ const DEFAULTS = {
   anpListen: { host: '127.0.0.1', port: 8787 },
   watchIntervalMs: 2_000,
   sweepIntervalMs: 1_000,
+  childScanIntervalMs: 60_000,
+  scheduleTickIntervalMs: 1_000,
 };
 
 function isRecord(value: unknown): value is Raw {
@@ -167,6 +173,16 @@ export function parseRouterConfig(
     routing: { strategy },
     watchIntervalMs: parseNonNegativeInt(root.watchIntervalMs, 'watchIntervalMs', DEFAULTS.watchIntervalMs),
     sweepIntervalMs: parseNonNegativeInt(root.sweepIntervalMs, 'sweepIntervalMs', DEFAULTS.sweepIntervalMs),
+    childScanIntervalMs: parseNonNegativeInt(
+      root.childScanIntervalMs,
+      'childScanIntervalMs',
+      DEFAULTS.childScanIntervalMs,
+    ),
+    scheduleTickIntervalMs: parseNonNegativeInt(
+      root.scheduleTickIntervalMs,
+      'scheduleTickIntervalMs',
+      DEFAULTS.scheduleTickIntervalMs,
+    ),
   };
 }
 

@@ -232,15 +232,18 @@ export class AnpMailbox implements MailboxPort {
     const label = input.label ?? `session:${randomUUID()}`;
     const existing = this.sessions.get(label);
     const now = new Date(this.now()).toISOString();
-    const session: OpenSession = existing ?? {
-      id: `mail-session-${randomUUID()}`,
-      label,
-      status: 'open',
-      cursorSeq: this.store.getCursor(CURSOR_KEY) ?? 0,
-      createdAt: now,
-      lastSeenAt: now,
-      closedAt: null,
-    };
+    // 同一 label 关闭后再次 open 要拿到新的会话；否则下一个 turn 会继承已关闭状态。
+    const session: OpenSession = existing && existing.status === 'open'
+      ? existing
+      : {
+          id: `mail-session-${randomUUID()}`,
+          label,
+          status: 'open',
+          cursorSeq: this.store.getCursor(CURSOR_KEY) ?? 0,
+          createdAt: now,
+          lastSeenAt: now,
+          closedAt: null,
+        };
     this.sessions.set(label, session);
     return this.toSession(session);
   }

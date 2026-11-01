@@ -528,6 +528,10 @@ export class RouterStore {
     );
   }
 
+  listAllSchedules(): ScheduleRow[] {
+    return this.db.all<ScheduleRow>('SELECT * FROM schedules ORDER BY created_at');
+  }
+
   cancelSchedule(id: string, ownerAgentId: string): boolean {
     const result = this.db.run(
       "UPDATE schedules SET state = 'done' WHERE id = ? AND owner_agent_id = ? AND state IN ('active', 'firing')",
@@ -537,17 +541,38 @@ export class RouterStore {
     return result.changes === 1;
   }
 
+  /** catch_up=skip：重启时把错过的触发直接推到下一次，不补投。 */
+  skipScheduleTo(id: string, nextRunAt: string | null): void {
+    this.db.run(
+      'UPDATE schedules SET state = ?, next_run_at = ? WHERE id = ?',
+      nextRunAt ? 'active' : 'done',
+      nextRunAt,
+      id,
+    );
+  }
+
   /**
    * 取到期 schedule 并推进下一次时间。`nextFor` 返回 null 表示这条 schedule 结束。
    * 整个过程在一个 IMMEDIATE 事务里，且 schedule_fires 的唯一键保证重复 tick 只触发一次。
    */
-  claimDue(now: string, limit: number, nextFor: (row: ScheduleRow) => string | null): DueSchedule[] {
+  claimDue(
+    now: string,
+    limit: number,
+    nextFor: (row: ScheduleRow) => string | null,
+    ownerIds?: string[],
+  ): DueSchedule[] {
     return this.db.tx(() => {
+      const filter = ownerIds === undefined
+        ? ''
+        : ownerIds.length === 0
+          ? ' AND 0'
+          : ` AND owner_agent_id IN (${ownerIds.map(() => '?').join(',')})`;
       const rows = this.db.all<ScheduleRow>(
         `SELECT * FROM schedules
-         WHERE state = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?
+         WHERE state = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?${filter}
          ORDER BY next_run_at LIMIT ?`,
         now,
+        ...(ownerIds ?? []),
         limit,
       );
       const claimed: DueSchedule[] = [];

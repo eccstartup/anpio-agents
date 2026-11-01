@@ -35,7 +35,16 @@ export type AnpTurnSessionOptions = {
   triggerMessageId?: string | null;
   maxMessages?: number;
   /** 后续阶段注入 ANP/子 agent/联网工具；缺省只用本地原语。 */
-  toolFactory?: (input: { runDir: string; turnId: string; definition: EmbeddedAgentDefinition }) => BrainLoopTools;
+  toolFactory?: (input: {
+    runDir: string;
+    turnId: string;
+    definition: EmbeddedAgentDefinition;
+    threadId: string;
+    triggerMessageId: string | null;
+    store: AgentStore;
+    mailbox: AnpMailbox;
+    markReplied: () => void;
+  }) => BrainLoopTools;
 };
 
 export class AnpTurnSession implements SessionTask {
@@ -257,7 +266,16 @@ export class AnpTurnSession implements SessionTask {
 
   private toolsFor(runDir: string): BrainLoopTools {
     if (this.toolFactory) {
-      return this.toolFactory({ runDir, turnId: this.turnId, definition: this.definition });
+      return this.toolFactory({
+        runDir,
+        turnId: this.turnId,
+        definition: this.definition,
+        threadId: this.threadId,
+        triggerMessageId: this.triggerMessageId,
+        store: this.store,
+        mailbox: this.mailbox,
+        markReplied: () => this.markReplied(),
+      });
     }
     return createTools({
       runDir,
@@ -288,8 +306,11 @@ export class AnpTurnSession implements SessionTask {
     const trigger = this.pulled[0];
     const targetDid = trigger?.publisherId;
     if (!trigger || !targetDid || !summary.trim()) return;
-    // 聊天消息没有明确要求回复时不再兜底回信，避免两个 agent 互相回声。
-    if (trigger.kind === 'anp.chat.message' && !trigger.ref.taskId) return;
+    // 聊天消息与定时触发没有明确要求回复时不再兜底回信，避免回声。
+    if (
+      !trigger.ref.taskId
+      && (trigger.kind === 'anp.chat.message' || trigger.kind === 'anp.schedule.fire')
+    ) return;
     try {
       await this.mailbox.send({
         targetDid,
