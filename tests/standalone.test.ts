@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDefinition, StandaloneConfigError } from '../src/standalone/config.ts';
+import { ConversationStore } from '../src/standalone/conversation.ts';
 import { createStandaloneRuntime, StandaloneAgent } from '../src/standalone/runner.ts';
 import { localTransport } from '../src/runtime/local/transport.ts';
 
@@ -282,6 +283,38 @@ test('CLI：stdin JSON 可带 threadId，配置错误退出码为 2', async () =
     const bad = await runCli(['--agent', join(dir, 'missing.json')], dir, '你好');
     assert.equal(bad.code, 2);
     assert.match(bad.stderr, /定义文件不存在/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI：同一 --thread 的两轮都会写进本地会话历史', async () => {
+  const dir = workspace();
+  try {
+    const file = writeDefinition(
+      dir,
+      'demo.json',
+      scriptDefinition([{ tool: 'finish', input: { summary: '脚本完成' } }]),
+    );
+    const root = join(dir, 'runs');
+    const first = await runCli(
+      ['--agent', file, '--message', '第一轮输入', '--thread', 'thread-1', '--root', root],
+      dir,
+    );
+    assert.equal(first.code, 0, first.stderr);
+    const second = await runCli(
+      ['--agent', file, '--message', '第二轮输入', '--thread', 'thread-1', '--root', root],
+      dir,
+    );
+    assert.equal(second.code, 0, second.stderr);
+
+    const store = new ConversationStore({ dir: join(root, '.local', 'conversations') });
+    assert.deepEqual(await store.load('thread-1'), [
+      { role: 'user', content: '第一轮输入' },
+      { role: 'assistant', content: '脚本完成' },
+      { role: 'user', content: '第二轮输入' },
+      { role: 'assistant', content: '脚本完成' },
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

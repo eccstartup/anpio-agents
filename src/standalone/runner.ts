@@ -13,6 +13,7 @@ import { defaultLocalRoot, localTransport, type LocalTransport } from '../runtim
 import type { ToolBackend } from '../runtime/transport.ts';
 import type { LogLevel, SessionResult } from '../runtime/types.ts';
 import { StandaloneConfigError } from './config.ts';
+import type { ConversationStore } from './conversation.ts';
 
 export function newRunId(now = new Date()): string {
   const stamp = now.toISOString().replace(/[-:]/g, '');
@@ -64,7 +65,7 @@ export async function createStandaloneRuntime(
 export type RunInput = {
   text: string;
   threadId?: string;
-  /** 多轮会话历史；P4 接入 ConversationStore 后由调用方提供。 */
+  /** 显式提供的历史；省略时从 ConversationStore 按 threadId 读取。 */
   history?: ChatMessage[];
 };
 
@@ -85,6 +86,8 @@ export type StandaloneAgentOptions = {
   /** 覆盖定义里的 completion；命令行可用。 */
   completion?: CompletionPolicy;
   maxMessages?: number;
+  /** 按 threadId 持久化多轮历史；不传时每次运行互不相干。 */
+  conversations?: ConversationStore;
 };
 
 /** 常驻在进程里的单 agent 执行器；每次 start() 建一个独立 Session。 */
@@ -112,6 +115,13 @@ export class StandaloneAgent {
     const threadId = input.threadId?.trim() || undefined;
     const runId = newRunId();
 
+    const history =
+      input.history !== undefined
+        ? input.history
+        : this.options.conversations && threadId
+          ? await this.options.conversations.load(threadId)
+          : undefined;
+
     await this.transport.runs.create(runId, {
       input: text,
       ...(threadId ? { threadId } : {}),
@@ -128,9 +138,10 @@ export class StandaloneAgent {
       runId,
       ...(definition ? { definition } : {}),
       ...(this.options.maxMessages === undefined ? {} : { maxMessages: this.options.maxMessages }),
-      ...(input.history && input.history.length > 0 ? { history: input.history } : {}),
+      ...(history && history.length > 0 ? { history } : {}),
     };
     const runtime = this.runtime;
+    const conversations = this.options.conversations;
 
     let session: ReturnType<AgentRuntime['createSession']> | null = null;
     let abortReason: string | null = null;
@@ -142,7 +153,20 @@ export class StandaloneAgent {
       try {
         session = runtime.createSession(request);
         if (abortReason) session.abort(abortReason);
-        return await session.run();
+        const result = await session.run();
+        if (conversations && threadId && result.status === 'succeeded' && result.summary?.trim()) {
+          try {
+            await conversations.append(threadId, [
+              { role: 'user', content: text },
+              { role: 'assistant', content: result.summary.trim() },
+            ]);
+          } catch (error) {
+            await this.transport.runs
+              .log(runId, 'warn', `会话历史写入失败：${error instanceof Error ? error.message : String(error)}`)
+              .catch(() => undefined);
+          }
+        }
+        return result;
       } finally {
         release();
       }

@@ -5,7 +5,13 @@
  * 退出码与 supervisor 路径一致：0 成功、2 结果未知、其他失败。
  */
 
+import { join } from 'node:path';
 import { loadDefinition, StandaloneConfigError } from './standalone/config.ts';
+import {
+  ConversationStore,
+  DEFAULT_HISTORY_BYTES,
+  DEFAULT_HISTORY_MESSAGES,
+} from './standalone/conversation.ts';
 import { createStandaloneRuntime, StandaloneAgent } from './standalone/runner.ts';
 import { startStandaloneServer } from './standalone/server.ts';
 import type { CompletionPolicy } from './definition.ts';
@@ -31,7 +37,7 @@ const HELP = `用法：npm run standalone -- --agent <定义文件> [选项]
 
 选项：
   --message <文本>        要处理的输入；省略时从 stdin 读取
-  --thread <id>           会话标识，写入本地消息引用
+  --thread <id>           会话标识；同一 id 自动带上前几轮历史
   --root <目录>           运行根（默认 $AGENT_RUN_ROOT 或 ./agent-runs）
   --completion <策略>     finish（默认）或 text：纯文本回答是否算完成
   --max-messages <n>      一轮最多处理几条消息（默认 5）
@@ -48,6 +54,7 @@ stdin 也可以传 JSON：{"text":"...","threadId":"可选"}。
   GET  /runs/:id          状态、摘要、错误与 token 统计
   GET  /health            {ok, active, queued}
   AGENT_HTTP_TOKEN        设置后所有接口要求 Authorization: Bearer <token>
+  AGENT_HISTORY_MAX_MESSAGES / AGENT_HISTORY_MAX_BYTES  会话历史保留上限
 `;
 
 function configError(message: string): never {
@@ -218,6 +225,11 @@ async function main(): Promise<number> {
   const agent = new StandaloneAgent(runtime, transport, {
     ...(options.completion ? { completion: options.completion } : {}),
     ...(options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }),
+    conversations: new ConversationStore({
+      dir: join(transport.root, '.local', 'conversations'),
+      maxMessages: envInt('AGENT_HISTORY_MAX_MESSAGES', DEFAULT_HISTORY_MESSAGES),
+      maxBytes: envInt('AGENT_HISTORY_MAX_BYTES', DEFAULT_HISTORY_BYTES),
+    }),
   });
 
   if (options.serve) {

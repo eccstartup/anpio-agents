@@ -93,6 +93,7 @@ echo '{"text":"继续处理","threadId":"thread-1"}' | npm run standalone -- --a
 ```
 
 - 定义文件由 `src/standalone/config.ts` 补齐 id、时间戳、`concurrency: 1`、`sessionIsolation: "inline"` 与限额；非 `script` 协议会补常见 `baseUrl`，缺 `apiKeyEnv` 指向的环境变量时启动即报错。
+- 同一个 `threadId` 的后续运行会自动带上前几轮历史（只存「用户输入 + 最终回答」），历史落在 `<root>/.local/conversations/`；超过 `AGENT_HISTORY_MAX_MESSAGES` / `AGENT_HISTORY_MAX_BYTES` 时从最旧的成对消息开始淘汰。失败的一轮不写入历史。
 - `completion` 缺省为 `finish`；聊天式定义可设为 `text`，模型给出纯文本回答即视为完成并 ack，也可用 `--completion text` 临时覆盖。
 - 定义里声明了本地传输层没有的平台工具时默认启动报错；`--allow-missing-tools` 可降级为只用本地原语。
 - 结果 JSON 写 stdout，运行日志写 stderr；退出码与 supervisor 路径一致：`0` 成功、`2` 结果未知、其他失败。
@@ -138,6 +139,8 @@ curl -sS http://127.0.0.1:8788/health
 | `AGENT_HTTP_TOKEN` | 无 | `--serve` 的 Bearer 令牌；监听非回环地址时必填 |
 | `AGENT_IDLE_MS` | `0` | 服务空闲多久自动退出；`0` 表示常驻 |
 | `AGENT_SHUTDOWN_GRACE_MS` | `15000` | 退出信号后等待运行收尾的时间，之后中断剩余 Session |
+| `AGENT_HISTORY_MAX_MESSAGES` | `40` | 每个 `threadId` 保留的消息条数上限 |
+| `AGENT_HISTORY_MAX_BYTES` | `262144` | 每个 `threadId` 保留的历史字节上限 |
 
 模型密钥沿用 `provider.apiKeyEnv` 里写的变量名（如 `ANTHROPIC_API_KEY`），值只从当前进程环境读取。
 
@@ -247,6 +250,7 @@ npm run check
 - `tests/local-transport.test.ts`：本地信箱的租约、ack/nack、并发拉取、落盘恢复与运行账本；
 - `tests/standalone.test.ts`：定义文件默认值与校验、独立运行的脚本/文本完成策略、工具降级与 CLI 输出；
 - `tests/standalone-serve.test.ts`：本地服务的提交/查询、并发限制、失败隔离、Bearer 鉴权、幂等键与 SIGTERM 收尾；
+- `tests/standalone-conversation.test.ts`：按 `threadId` 的历史落盘、跨轮注入、条数/字节淘汰与失败不写入；
 - `tests/worker.test.ts`：跨进程验证一个 worker 并发跑两个 Session、一个失败不影响另一个，以及 SIGTERM 后的收尾与消息退回；`sessionIsolation: 'process'` 下同样的并发用例换到两个 Session 子进程里跑，另含子进程 SIGTERM 中断与崩溃（`outcome_unknown`）的用例；
 - `tests/supervisor.test.ts`：跨进程跑一个 script 智能体，验证接活、提交、ack、收尾与目录回收；
 - `tests/tools.test.ts`：工具层与外部 Agent 的接口对齐（待办、拒绝、评论、开放池、文件）；
