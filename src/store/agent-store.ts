@@ -439,6 +439,21 @@ export class AgentStore {
     );
   }
 
+  /** 当前可以开始新 turn 的 thread（有到期、未租用的待处理消息）。 */
+  pendingThreadIds(now = Date.now(), limit = 50): string[] {
+    return this.db
+      .all<{ thread_id: string }>(
+        `SELECT DISTINCT thread_id FROM inbox
+         WHERE status = 'pending' AND retry_at <= ?
+           AND (lease_until IS NULL OR lease_until <= ?)
+         ORDER BY thread_id LIMIT ?`,
+        now,
+        now,
+        limit,
+      )
+      .map(row => row.thread_id);
+  }
+
   inboxByMessage(messageId: string): InboxRow | undefined {
     return this.db.get<InboxRow>('SELECT * FROM inbox WHERE message_id = ?', messageId);
   }

@@ -288,6 +288,8 @@ export class AnpTurnSession implements SessionTask {
     const trigger = this.pulled[0];
     const targetDid = trigger?.publisherId;
     if (!trigger || !targetDid || !summary.trim()) return;
+    // 聊天消息没有明确要求回复时不再兜底回信，避免两个 agent 互相回声。
+    if (trigger.kind === 'anp.chat.message' && !trigger.ref.taskId) return;
     try {
       await this.mailbox.send({
         targetDid,
