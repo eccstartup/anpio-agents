@@ -94,6 +94,7 @@ echo '{"text":"继续处理","threadId":"thread-1"}' | npm run standalone -- --a
 
 - 定义文件由 `src/standalone/config.ts` 补齐 id、时间戳、`concurrency: 1`、`sessionIsolation: "inline"` 与限额；非 `script` 协议会补常见 `baseUrl`，缺 `apiKeyEnv` 指向的环境变量时启动即报错。
 - 同一个 `threadId` 的后续运行会自动带上前几轮历史（只存「用户输入 + 最终回答」），历史落在 `<root>/.local/conversations/`；超过 `AGENT_HISTORY_MAX_MESSAGES` / `AGENT_HISTORY_MAX_BYTES` 时从最旧的成对消息开始淘汰。失败的一轮不写入历史。
+- 定义里写 `sessionIsolation: "process"` 时，每次运行在独立子进程里执行（入口仍是 `src/session.ts`），父进程只负责并发、超时与结果收集；`history` 会一并传进子进程。
 - `completion` 缺省为 `finish`；聊天式定义可设为 `text`，模型给出纯文本回答即视为完成并 ack，也可用 `--completion text` 临时覆盖。
 - 定义里声明了本地传输层没有的平台工具时默认启动报错；`--allow-missing-tools` 可降级为只用本地原语。
 - 结果 JSON 写 stdout，运行日志写 stderr；退出码与 supervisor 路径一致：`0` 成功、`2` 结果未知、其他失败。
@@ -120,13 +121,17 @@ curl -sS http://127.0.0.1:8788/runs/run-...
 # 健康快照
 curl -sS http://127.0.0.1:8788/health
 # {"ok":true,"active":0,"queued":0}
+
+# 流式看一轮的日志与最终结果（NDJSON，运行结束即关闭）
+curl -sS -N http://127.0.0.1:8788/runs/run-.../events
 ```
 
-- 只有三个接口：`POST /runs`、`GET /runs/:id`、`GET /health`；没有提交列表，状态直接来自本地运行账本。
+- 只有四个接口：`POST /runs`、`GET /runs/:id`、`GET /runs/:id/events`、`GET /health`；没有提交列表，状态直接来自本地运行账本。
 - 默认只监听 `127.0.0.1`。监听非回环地址时必须设 `AGENT_HTTP_TOKEN`，否则启动报错；设了令牌后所有接口都要求 `Authorization: Bearer <token>`。
 - 队列与并发复用 `AgentRuntime` 的信号量：`concurrency: 1` 时第二个请求返回 202 后在队列里等待，`/health` 会看到 `active: 1, queued: 1`。
 - 可选 `Idempotency-Key` 请求头：同一个 key 重复提交返回同一个 `runId`，不会重复执行。
 - 一个运行失败不影响其他运行，结果落在各自的运行记录里。
+- `GET /runs/:id/events` 是 NDJSON 流：先逐行输出 `{type:"log",...}`，收尾时输出一行 `{type:"result",...}` 并关闭；客户端断开即停止读取。
 - `SIGTERM` / `SIGINT`：停止接新请求（`503`）→ 等待在跑的 Session 收尾（默认 15 秒）→ 超时后中止剩余运行再退出。
 - 请求体上限 1 MiB，超出返回 `413`；非法 JSON / 缺少 `text` 返回 `400`。
 
@@ -248,8 +253,8 @@ npm run check
 
 - `tests/runtime.test.ts`：同一 AgentRuntime 顺序 / 并发跑多个 Session，目录、信箱与并发上限；
 - `tests/local-transport.test.ts`：本地信箱的租约、ack/nack、并发拉取、落盘恢复与运行账本；
-- `tests/standalone.test.ts`：定义文件默认值与校验、独立运行的脚本/文本完成策略、工具降级与 CLI 输出；
-- `tests/standalone-serve.test.ts`：本地服务的提交/查询、并发限制、失败隔离、Bearer 鉴权、幂等键与 SIGTERM 收尾；
+- `tests/standalone.test.ts`：定义文件默认值与校验、独立运行的脚本/文本完成策略、工具降级、`sessionIsolation=process` 与 CLI 输出；
+- `tests/standalone-serve.test.ts`：本地服务的提交/查询、事件流、并发限制、失败隔离、Bearer 鉴权、幂等键与 SIGTERM 收尾；
 - `tests/standalone-conversation.test.ts`：按 `threadId` 的历史落盘、跨轮注入、条数/字节淘汰与失败不写入；
 - `tests/worker.test.ts`：跨进程验证一个 worker 并发跑两个 Session、一个失败不影响另一个，以及 SIGTERM 后的收尾与消息退回；`sessionIsolation: 'process'` 下同样的并发用例换到两个 Session 子进程里跑，另含子进程 SIGTERM 中断与崩溃（`outcome_unknown`）的用例；
 - `tests/supervisor.test.ts`：跨进程跑一个 script 智能体，验证接活、提交、ack、收尾与目录回收；

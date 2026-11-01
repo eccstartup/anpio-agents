@@ -288,6 +288,50 @@ test('CLI：stdin JSON 可带 threadId，配置错误退出码为 2', async () =
   }
 });
 
+test('独立运行：sessionIsolation=process 时在子进程里完成一轮并 ack', async () => {
+  const dir = workspace();
+  try {
+    const file = writeDefinition(
+      dir,
+      'process-agent.json',
+      scriptDefinition(
+        [
+          { tool: 'write_file', input: { path: 'from-child.txt', content: 'ok\n' } },
+          { tool: 'finish', input: { summary: '子进程完成' } },
+        ],
+        {
+          id: 'process-agent',
+          tools: ['write_file', 'finish'],
+          sessionIsolation: 'process',
+          limits: { timeoutMs: 15_000 },
+        },
+      ),
+    );
+    const root = join(dir, 'runs');
+    const definition = await loadDefinition(file);
+    const { runtime, transport } = await createStandaloneRuntime(definition, {
+      root,
+      log: () => undefined,
+    });
+    const agent = new StandaloneAgent(runtime, transport, {
+      conversations: new ConversationStore({ dir: join(root, '.local', 'conversations') }),
+    });
+
+    const { result } = await agent.run({ text: '在子进程里跑', threadId: 'process-thread' });
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.summary, '子进程完成');
+    assert.deepEqual(await transport.mailbox.stats(), { pending: 0, acked: 1, sessions: 0 });
+
+    const store = new ConversationStore({ dir: join(root, '.local', 'conversations') });
+    assert.deepEqual(await store.load('process-thread'), [
+      { role: 'user', content: '在子进程里跑' },
+      { role: 'assistant', content: '子进程完成' },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('CLI：同一 --thread 的两轮都会写进本地会话历史', async () => {
   const dir = workspace();
   try {

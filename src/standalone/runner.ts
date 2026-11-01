@@ -144,7 +144,7 @@ export class StandaloneAgent {
     const runtime = this.runtime;
     const conversations = this.options.conversations;
 
-    let session: ReturnType<AgentRuntime['createSession']> | null = null;
+    let session: ReturnType<AgentRuntime['createSessionTask']> | null = null;
     let abortReason: string | null = null;
 
     this.queuedCount += 1;
@@ -152,7 +152,7 @@ export class StandaloneAgent {
       const release = await runtime.acquire();
       this.queuedCount -= 1;
       try {
-        session = runtime.createSession(request);
+        session = runtime.createSessionTask(request);
         if (abortReason) session.abort(abortReason);
         const result = await session.run();
         if (conversations && threadId && result.status === 'succeeded' && result.summary?.trim()) {

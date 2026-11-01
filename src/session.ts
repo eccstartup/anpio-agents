@@ -14,6 +14,7 @@ import { AgentRuntime, collabRuntime } from './runtime/agent.ts';
 import { localTransport } from './runtime/local/transport.ts';
 import type { SessionOutcome, SessionRequest } from './runtime/types.ts';
 import type { MailEnvelope } from './client.ts';
+import type { ChatMessage } from './brains/types.ts';
 import type { EmbeddedAgentDefinition } from './definition.ts';
 
 type TransportConfig =
@@ -30,6 +31,8 @@ type RunConfig = {
   definition: EmbeddedAgentDefinition;
   workdir?: string;
   maxMessages?: number;
+  /** 独立运行的多轮历史；平台路径不传。 */
+  history?: ChatMessage[];
   /** 进程隔离模式下由 worker 开启：把事件写到 stdout。 */
   reportResult?: boolean;
 };
@@ -90,6 +93,7 @@ async function main(): Promise<number> {
     runId: config.runId,
     definition: config.definition,
     ...(config.maxMessages === undefined ? {} : { maxMessages: config.maxMessages }),
+    ...(config.history && config.history.length > 0 ? { history: config.history } : {}),
     ...(config.reportResult
       ? {
           onMailPulled: async (envelopes: MailEnvelope[]) => {

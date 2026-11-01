@@ -297,6 +297,57 @@ test('服务：Bearer 鉴权、幂等键与非回环地址保护', async () => {
   }
 });
 
+test('服务：GET /runs/:id/events 流式返回日志与最终结果', async () => {
+  const dir = workspace();
+  try {
+    const definition = normalizeDefinition(
+      {
+        provider: {
+          protocol: 'script',
+          script: [
+            { tool: 'shell', input: { command: 'sleep 0.3' } },
+            { tool: 'finish', input: { summary: '流式完成' } },
+          ],
+        },
+        tools: ['shell', 'finish'],
+        sandbox: { shell: true },
+      },
+      'events-agent',
+    );
+    const root = join(dir, 'runs');
+    const { runtime, transport } = await createStandaloneRuntime(definition, {
+      root,
+      log: () => undefined,
+    });
+    const agent = new StandaloneAgent(runtime, transport);
+    const server = await startStandaloneServer({ agent, runtime, transport, port: 0 });
+    try {
+      const started = await postRun(server.url, { text: '看看进度' });
+      assert.equal(started.status, 202);
+      const runId = ((await started.json()) as { runId: string }).runId;
+
+      const response = await fetch(`${server.url}/runs/${runId}/events`);
+      assert.equal(response.status, 200);
+      const lines = (await response.text())
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line) as Json);
+      assert.ok(lines.some(line => line.type === 'log' && String(line.text).includes('调用工具 shell')));
+      const last = lines.at(-1)!;
+      assert.equal(last.type, 'result');
+      assert.equal(last.status, 'succeeded');
+      assert.equal(last.summary, '流式完成');
+
+      const missing = await fetch(`${server.url}/runs/run-nope/events`);
+      assert.equal(missing.status, 404);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('服务：SIGTERM 停止接新请求，并等在跑的一轮收尾', async () => {
   const dir = workspace();
   const root = join(dir, 'runs');

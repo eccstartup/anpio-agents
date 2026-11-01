@@ -49,6 +49,7 @@ export class ProcessSession implements SessionTask {
   private readonly runtime: AgentRuntime;
   private readonly definition: EmbeddedAgentDefinition;
   private readonly maxMessages: number | undefined;
+  private readonly history: SessionRequest['history'];
   private readonly pulled: PulledEnvelope[] = [];
 
   private child: ChildProcess | null = null;
@@ -64,6 +65,7 @@ export class ProcessSession implements SessionTask {
     this.runId = request.runId;
     this.definition = request.definition ?? runtime.definition;
     this.maxMessages = request.maxMessages;
+    this.history = request.history;
   }
 
   abort(reason: string): void {
@@ -105,6 +107,7 @@ export class ProcessSession implements SessionTask {
       // 让子进程把拉取到的消息与最终结果作为 JSON 行写到 stdout。
       reportResult: true,
       ...(this.maxMessages === undefined ? {} : { maxMessages: this.maxMessages }),
+      ...(this.history && this.history.length > 0 ? { history: this.history } : {}),
     };
 
     return new Promise<Exit>(resolve => {

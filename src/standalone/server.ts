@@ -158,6 +158,51 @@ export async function startStandaloneServer(options: StandaloneServerOptions): P
     return shutdownPromise;
   };
 
+  const handleEvents = async (req: IncomingMessage, res: ServerResponse, runId: string): Promise<void> => {
+    const record = await transport.runs.get(runId);
+    if (!record) throw new HttpError(404, '没有这个运行');
+    res.writeHead(200, {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+    });
+    let disconnected = false;
+    req.once('close', () => {
+      disconnected = true;
+    });
+    let cursor = 0;
+    for (;;) {
+      const lines = await transport.runs.readLog(runId, 100_000);
+      if (lines.length > cursor) {
+        for (const line of lines.slice(cursor)) {
+          if (disconnected) return;
+          res.write(`${JSON.stringify({ type: 'log', ...line })}\n`);
+        }
+        cursor = lines.length;
+      }
+      const current = await transport.runs.get(runId);
+      if (current && current.status !== 'running') {
+        if (!disconnected) {
+          res.end(
+            `${JSON.stringify({
+              type: 'result',
+              runId,
+              status: current.status,
+              summary: current.summary,
+              error: current.error,
+              turns: current.turns,
+              promptTokens: current.promptTokens,
+              completionTokens: current.completionTokens,
+            })}\n`,
+          );
+        }
+        return;
+      }
+      touch();
+      await delay(200);
+    }
+  };
+
   const handleRun = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const body = await readJsonBody(req);
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -234,6 +279,12 @@ export async function startStandaloneServer(options: StandaloneServerOptions): P
       if (url.pathname === '/runs' && method === 'POST') {
         if (stopping) throw new HttpError(503, '服务正在退出，不再接受新运行');
         await handleRun(req, res);
+        return;
+      }
+      if (url.pathname.startsWith('/runs/') && url.pathname.endsWith('/events') && method === 'GET') {
+        const runId = decodeURIComponent(url.pathname.slice('/runs/'.length, -'/events'.length));
+        if (!RUN_ID.test(runId)) throw new HttpError(404, '没有这个运行');
+        await handleEvents(req, res, runId);
         return;
       }
       if (url.pathname.startsWith('/runs/') && method === 'GET') {
