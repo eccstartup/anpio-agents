@@ -12,8 +12,17 @@
     "worker": "node --disable-warning=ExperimentalWarning src/agent-worker.ts",
     "session": "node --disable-warning=ExperimentalWarning src/session.ts",
     "standalone": "node --disable-warning=ExperimentalWarning src/standalone.ts",
+    "router": "node --disable-warning=ExperimentalWarning src/router/main.ts",
+    "anp:send": "node --disable-warning=ExperimentalWarning src/anp/send-cli.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anpio-cli/core": "file:../anpio-cli/packages/core",
+    "@anpio-cli/service": "file:../anpio-cli/packages/service"
+  },
+  "overrides": {
+    "@anpio-cli/core": "file:../anpio-cli/packages/core"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
