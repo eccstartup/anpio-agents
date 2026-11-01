@@ -11,6 +11,7 @@
  */
 
 import { AgentRuntime, collabRuntime } from './runtime/agent.ts';
+import { localTransport } from './runtime/local/transport.ts';
 import type { SessionOutcome, SessionRequest } from './runtime/types.ts';
 import type { MailEnvelope } from './client.ts';
 import type { EmbeddedAgentDefinition } from './definition.ts';
@@ -77,7 +78,13 @@ async function main(): Promise<number> {
       definition: config.definition,
     });
   } else {
-    throw new Error('本地传输层的 process 隔离尚未启用');
+    const local = localTransport({ root: transport.root });
+    runtime = await AgentRuntime.create({
+      agentId: config.agentId,
+      definition: config.definition,
+      transport: local,
+      rootBase: local.root,
+    });
   }
   const request: SessionRequest = {
     runId: config.runId,
