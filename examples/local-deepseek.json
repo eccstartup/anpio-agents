@@ -1,0 +1,18 @@
+{
+  "id": "local-deepseek",
+  "name": "DeepSeek 本地助手",
+  "description": "不接协作平台的独立智能体；需要 DEEPSEEK_API_KEY。",
+  "provider": {
+    "id": "deepseek",
+    "protocol": "openai-chat",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "apiKeyEnv": "DEEPSEEK_API_KEY"
+  },
+  "systemPrompt": "你是一个独立运行的助手。先确认目标，再动手；结论要能直接使用。",
+  "tools": ["shell", "read_file", "write_file", "list_files", "finish"],
+  "completion": "text",
+  "limits": { "maxTurns": 12, "timeoutMs": 180000, "maxTokens": 8192 },
+  "sandbox": { "shell": true, "shellTimeoutMs": 30000, "maxOutputBytes": 65536 },
+  "concurrency": 1
+}

@@ -82,6 +82,32 @@ test('定义加载器：非 script 协议补默认地址，缺密钥启动即报
   }
 });
 
+test('定义加载器：OpenAI 兼容供应商可覆盖 baseUrl（如 DeepSeek）', async () => {
+  const dir = workspace();
+  const envName = 'ANPIO_TEST_DEEPSEEK_KEY';
+  const previous = process.env[envName];
+  process.env[envName] = 'test-key';
+  try {
+    const file = writeDefinition(dir, 'deepseek.json', {
+      provider: {
+        protocol: 'openai-chat',
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        apiKeyEnv: envName,
+      },
+      tools: ['finish'],
+    });
+    const definition = await loadDefinition(file);
+    assert.equal(definition.provider.baseUrl, 'https://api.deepseek.com/v1');
+    assert.equal(definition.provider.model, 'deepseek-chat');
+    assert.equal(definition.provider.apiKeyEnv, envName);
+  } finally {
+    if (previous === undefined) delete process.env[envName];
+    else process.env[envName] = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('定义加载器：拒绝不可用协议、未知工具与未开启的 shell', async () => {
   const dir = workspace();
   try {

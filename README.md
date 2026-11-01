@@ -84,6 +84,9 @@ npm run standalone -- --agent examples/local-demo.json --message "跑一下"
 
 # 真实模型（密钥仍只从环境变量读）
 ANTHROPIC_API_KEY=... npm run standalone -- --agent examples/local-assistant.json --message "帮我看看这个目录"
+
+# DeepSeek：走 OpenAI 兼容协议，示例定义里已覆盖 baseUrl
+DEEPSEEK_API_KEY=... npm run standalone -- --agent examples/local-deepseek.json --message "帮我看看这个目录"
 ```
 
 也可以用 stdin 传 JSON，带上 `threadId` 便于上层把多轮串起来：
@@ -93,6 +96,7 @@ echo '{"text":"继续处理","threadId":"thread-1"}' | npm run standalone -- --a
 ```
 
 - 定义文件由 `src/standalone/config.ts` 补齐 id、时间戳、`concurrency: 1`、`sessionIsolation: "inline"` 与限额；非 `script` 协议会补常见 `baseUrl`，缺 `apiKeyEnv` 指向的环境变量时启动即报错。
+- 其他 OpenAI 兼容供应商（DeepSeek、Moonshot、通义等）用 `protocol: "openai-chat"`，把 `provider.baseUrl` 指向对方的 `/v1` 地址并改 `model` 即可，见 `examples/local-deepseek.json`。
 - 同一个 `threadId` 的后续运行会自动带上前几轮历史（只存「用户输入 + 最终回答」），历史落在 `<root>/.local/conversations/`；超过 `AGENT_HISTORY_MAX_MESSAGES` / `AGENT_HISTORY_MAX_BYTES` 时从最旧的成对消息开始淘汰。失败的一轮不写入历史。
 - 定义里写 `sessionIsolation: "process"` 时，每次运行在独立子进程里执行（入口仍是 `src/session.ts`），父进程只负责并发、超时与结果收集；`history` 会一并传进子进程。
 - `completion` 缺省为 `finish`；聊天式定义可设为 `text`，模型给出纯文本回答即视为完成并 ack，也可用 `--completion text` 临时覆盖。
