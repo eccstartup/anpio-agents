@@ -6,14 +6,15 @@
  * 任何可变状态，单个 Session 抛错不会影响同 agent 的其它 Session。
  */
 
-import type { ChatMessage, ToolSpec } from '../brains/types.ts';
+import type { ChatMessage } from '../brains/types.ts';
 import type { MailEnvelope } from '../client.ts';
 import type { CompletionPolicy, EmbeddedAgentDefinition } from '../definition.ts';
 import { createRunDir, keepRunDir, removeRunDir, scrubbedEnv } from '../sandbox.ts';
 import { createTools } from '../tools.ts';
 import type { AgentRuntime } from './agent.ts';
+import { runBrainLoop } from './brain-loop.ts';
 import { createRunLog, type RunLog, type RunLogger } from './log.ts';
-import { envelopeText, substitute, systemPromptFor, writeAgentsFile } from './prompt.ts';
+import { envelopeText, systemPromptFor, writeAgentsFile } from './prompt.ts';
 import type { AgentTransport } from './transport.ts';
 import type { SessionRequest, SessionResult } from './types.ts';
 
@@ -169,77 +170,38 @@ export class AgentSession {
         now: new Date().toISOString(),
       };
 
-      while (result.turns < definition.limits.maxTurns) {
-        if (this.deadline.signal.aborted) {
-          if (this.interrupted) {
-            result.status = 'failed';
-            result.error = this.interrupted;
-          } else {
-            result.status = 'timeout';
-            result.error = `超过时限 ${definition.limits.timeoutMs}ms`;
-          }
-          break;
-        }
-        result.turns += 1;
-        await heartbeat();
-        const response = await brain.complete({
-          system,
-          messages,
-          tools: tools.specs as ToolSpec[],
-          maxTokens: definition.limits.maxTokens,
-          signal: this.deadline.signal,
-        });
-        result.promptTokens += response.usage?.promptTokens ?? 0;
-        result.completionTokens += response.usage?.completionTokens ?? 0;
-        if (response.text) this.log('info', `模型：${response.text.slice(0, 500)}`);
-
-        if (!response.toolCalls || response.toolCalls.length === 0) {
-          if (response.text) messages.push({ role: 'assistant', content: response.text });
-          if (this.completion === 'text' && response.text?.trim()) {
-            finished = { summary: response.text.trim(), outcome: 'done' };
-            this.log('info', '模型给出文本回答，按 text 完成策略收尾');
-          } else {
-            // finish 策略下没有 finish 就没有可交付的结论；这条消息会退回队列。
-            result.status = 'failed';
-            result.error = '模型没有再调用工具，本轮到此为止';
-            this.log('warn', result.error);
-          }
-          break;
-        }
-
-        const calls = response.toolCalls.map(call => ({ ...call, input: substitute(call.input, vars) }));
-        messages.push({
-          role: 'assistant',
-          ...(response.text ? { content: response.text } : {}),
-          toolCalls: calls,
-        });
-
-        let stopped = false;
-        for (const call of calls) {
-          this.log('info', `调用工具 ${call.name}：${JSON.stringify(call.input).slice(0, 300)}`);
+      const loop = await runBrainLoop({
+        brain,
+        tools,
+        messages,
+        system,
+        maxTurns: definition.limits.maxTurns,
+        maxTokens: definition.limits.maxTokens,
+        completion: this.completion,
+        vars,
+        signal: this.deadline.signal,
+        log: this.log,
+        heartbeat,
+        onToolExecuted: () => {
           this.toolExecuted = true;
-          const execution = await tools.execute(call);
-          messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: execution.content });
-          if (execution.uncertain) {
-            result.status = 'outcome_unknown';
-            result.error = execution.uncertain;
-            stopped = true;
-            break;
-          }
-          if (execution.finish) {
-            finished = execution.finish;
-            stopped = true;
-            break;
-          }
+        },
+      });
+      finished = loop.finished;
+      result.turns = loop.turns;
+      result.promptTokens = loop.promptTokens;
+      result.completionTokens = loop.completionTokens;
+      result.toolExecuted = loop.toolExecuted;
+      if (loop.aborted) {
+        if (this.interrupted) {
+          result.status = 'failed';
+          result.error = this.interrupted;
+        } else {
+          result.status = 'timeout';
+          result.error = `超过时限 ${definition.limits.timeoutMs}ms`;
         }
-        if (stopped) break;
-        await heartbeat();
-      }
-
-      if (result.status === 'succeeded' && !finished && result.turns >= definition.limits.maxTurns) {
-        this.log('warn', `达到轮次上限 ${definition.limits.maxTurns}，按未完成收尾`);
-        result.status = 'failed';
-        result.error = `达到轮次上限 ${definition.limits.maxTurns} 仍未结束`;
+      } else {
+        result.status = loop.status;
+        result.error = loop.error;
       }
 
       if (finished) {
