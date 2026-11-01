@@ -128,6 +128,7 @@ export class StandaloneAgent {
     });
     await this.transport.enqueue({
       text,
+      runId,
       ...(threadId ? { threadId } : {}),
     });
 

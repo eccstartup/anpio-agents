@@ -15,6 +15,8 @@ type StoredMessage = {
   seq: number;
   state: 'pending' | 'acked';
   attempts: number;
+  /** 一次性运行时这条输入属于哪个 run；为空表示不绑定。 */
+  runId: string | null;
   /** epoch ms；在此之前不重新投递。 */
   retryAt: number;
   lease: { sessionId: string; deliveryId: string; until: number } | null;
@@ -43,6 +45,8 @@ type MailboxState = {
 export type EnqueueInput = {
   text: string;
   threadId?: string;
+  /** 只允许这个 run 的信箱会话拉取；一次性运行用。 */
+  runId?: string;
   kind?: string;
   topic?: string;
   priority?: string;
@@ -108,6 +112,7 @@ export class LocalMailbox implements MailboxPort {
         seq,
         state: 'pending',
         attempts: 0,
+        runId: input.runId ?? null,
         retryAt: 0,
         lease: null,
         lastReason: null,
@@ -146,8 +151,10 @@ export class LocalMailbox implements MailboxPort {
       const now = this.now();
       const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 20), 100));
       const leaseMs = Math.max(0, options.leaseSeconds ?? 300) * 1_000;
+      const boundRun = session.label.startsWith('run:') ? session.label.slice('run:'.length) : null;
       const candidates = state.messages
         .filter(item => item.state === 'pending')
+        .filter(item => boundRun === null || item.runId === boundRun)
         .filter(item => item.retryAt <= now)
         .filter(item => !session.delivered.includes(item.message.id))
         .filter(item => !item.lease || item.lease.until <= now)
@@ -218,6 +225,17 @@ export class LocalMailbox implements MailboxPort {
         if (stored.lease?.sessionId === sessionId) {
           stored.lease = null;
           stored.retryAt = now;
+        }
+      }
+      const boundRun = session.label.startsWith('run:') ? session.label.slice('run:'.length) : null;
+      if (boundRun) {
+        // 一次性运行不会重投；残留的输入直接终止，免得永远停在 pending。
+        for (const stored of state.messages) {
+          if (stored.runId === boundRun && stored.state === 'pending') {
+            stored.state = 'acked';
+            stored.lease = null;
+            stored.lastReason ??= '一次性运行结束，未重投';
+          }
         }
       }
     });

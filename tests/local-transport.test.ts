@@ -52,6 +52,40 @@ test('本地信箱：两个会话并发拉取不重复投递', async () => {
   assert.match(body.text, /第一条|第二条/);
 });
 
+test('本地信箱：绑定 runId 的消息只会被对应运行拉走', async () => {
+  const mailbox = new LocalMailbox();
+  const firstMessage = await mailbox.enqueue({ text: '属于 A', runId: 'run-a' });
+  const secondMessage = await mailbox.enqueue({ text: '属于 B', runId: 'run-b' });
+
+  const sessionA = await mailbox.open({ label: 'run:run-a' });
+  const sessionB = await mailbox.open({ label: 'run:run-b' });
+  const pageA = await mailbox.pull(sessionA.id);
+  const pageB = await mailbox.pull(sessionB.id);
+
+  assert.deepEqual(pageA.items.map(item => item.id), [firstMessage.id]);
+  assert.deepEqual(pageB.items.map(item => item.id), [secondMessage.id]);
+
+  await mailbox.close(sessionA.id);
+  const reopenedA = await mailbox.open({ label: 'run:run-a' });
+  const empty = await mailbox.pull(reopenedA.id);
+  assert.equal(empty.items.length, 0);
+});
+
+test('本地信箱：一次性运行结束后，未确认的输入不会一直 pending', async () => {
+  const mailbox = new LocalMailbox();
+  await mailbox.enqueue({ text: '会失败', runId: 'run-fail' });
+  const session = await mailbox.open({ label: 'run:run-fail' });
+  const page = await mailbox.pull(session.id);
+  await mailbox.nack(page.items[0]!.id, {
+    deliveryId: page.items[0]!.deliveryId,
+    reason: '本轮失败',
+  });
+  assert.deepEqual(await mailbox.stats(), { pending: 1, acked: 0, sessions: 1 });
+
+  await mailbox.close(session.id);
+  assert.deepEqual(await mailbox.stats(), { pending: 0, acked: 1, sessions: 0 });
+});
+
 test('本地信箱：ack 后不再投递，nack 退避后可由新会话拉起', async () => {
   const time = clock();
   const mailbox = new LocalMailbox({ now: time.now });
