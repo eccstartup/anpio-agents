@@ -197,6 +197,7 @@ npm run check
 
 ## 相关文档
 
-- [行动计划](docs/action-plan.md)：从「一次运行一个进程」到「常驻 Agent 承载多 Session」，含参考实现与开工清单
+- [行动计划](docs/action-plan.md)：从「一次运行一个进程」到「常驻 Agent 承载多 Session」，已完成
+- [独立运行方案](docs/standalone-plan.md)：把控制面抽成端口，让同一个执行引擎可以脱离 anpio-collab 单独运行，并为任意触发/工具接口预留扩展点
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议
