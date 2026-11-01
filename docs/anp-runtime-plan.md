@@ -468,6 +468,8 @@ docker run --rm -d \
 
 建议顺序：P0 → P1 → P2 → P3 是「单 agent 长期存活 + ANP 交互」的最小闭环；P4 起进入多 agent；P7/P8 可按需要提前。
 
+实施状态（2026-11-02）：P0–P9 已实现，示例与离线端到端见 `examples/anp/` 与 `tests/e2e.test.ts`。与本文的两处实现差异：`anp.isolation=process` 目前仍在 router 进程内执行（保留值，尚未拆每 turn 子进程），真正隔离请用 `container`；容器按 turn 创建并在 turn 结束删除，而不是整个 session 复用一个。
+
 ## 9. 文件边界
 
 | 处理 | 文件 |
@@ -582,7 +584,7 @@ npm run anp:send -- --from planner --to worker --thread t1 --text "把这份目�
 | --- | --- | --- | --- | --- | --- | --- |
 | A 内嵌执行器 | `npm run runtime` | anpio-collab HTTP v1 | collab 派生令牌 | collab 信箱 / 运行记录 | 是 | 已存在，行为不变 |
 | B 单 agent 独立 | `npm run standalone` | 本地传输层 | 无 DID | CLI / `POST /runs` | 否 | 已存在，行为不变 |
-| C 多 agent 常驻 | `npm run router` | router SQLite + 内嵌 ANP-09 | 每个 agent 自己的 DID:WBA | 外部 ANP 消息 / 定时任务 / 管理 API | 否 | 本计划新增 |
+| C 多 agent 常驻 | `npm run router` | router SQLite + 内嵌 ANP-09 | 每个 agent 自己的 DID:WBA | 外部 ANP 消息 / 定时任务 / 管理 API | 否 | 已实现（P0–P9） |
 | D router 接入 collab | `npm run router -- --collab` | router + collab `/v1` | 每个 agent 自己的 DID，ANP 登录换 token | collab 任务/信箱 + ANP 消息 | 是（单向 HTTP） | 本计划预留，P10 |
 
 - **A 是「collab 调度 agents」**：定义、派生令牌、运行账本都在 collab，agent 只是执行器；已有能力，不改。
