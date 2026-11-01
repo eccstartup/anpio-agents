@@ -162,5 +162,6 @@ npm run check
 
 ## 相关文档
 
+- [行动计划](docs/action-plan.md)：从「一次运行一个进程」到「常驻 Agent 承载多 Session」，含参考实现与开工清单
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议
