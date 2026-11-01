@@ -73,17 +73,27 @@ export type StandaloneRun = {
   result: SessionResult;
 };
 
+export type RunHandle = {
+  runId: string;
+  /** 结果不会 reject：Session 内部已经把异常收敛成 SessionResult。 */
+  done: Promise<SessionResult>;
+  /** 本轮还没拿到并发槽位时也能中止，拿到后立即生效。 */
+  abort(reason: string): void;
+};
+
 export type StandaloneAgentOptions = {
   /** 覆盖定义里的 completion；命令行可用。 */
   completion?: CompletionPolicy;
   maxMessages?: number;
 };
 
-/** 常驻在进程里的单 agent 执行器；每次 run() 建一个独立 Session。 */
+/** 常驻在进程里的单 agent 执行器；每次 start() 建一个独立 Session。 */
 export class StandaloneAgent {
   private readonly runtime: AgentRuntime;
   private readonly transport: LocalTransport;
   private readonly options: StandaloneAgentOptions;
+  private readonly handles = new Set<RunHandle>();
+  private queuedCount = 0;
 
   constructor(runtime: AgentRuntime, transport: LocalTransport, options: StandaloneAgentOptions = {}) {
     this.runtime = runtime;
@@ -91,7 +101,12 @@ export class StandaloneAgent {
     this.options = options;
   }
 
-  async run(input: RunInput): Promise<StandaloneRun> {
+  /** 已提交、但还在等并发槽位的运行数。 */
+  get queued(): number {
+    return this.queuedCount;
+  }
+
+  async start(input: RunInput): Promise<RunHandle> {
     const text = input.text.trim();
     if (!text) throw new StandaloneConfigError('输入不能为空');
     const threadId = input.threadId?.trim() || undefined;
@@ -109,12 +124,50 @@ export class StandaloneAgent {
     const definition: EmbeddedAgentDefinition | undefined = this.options.completion
       ? { ...this.runtime.definition, completion: this.options.completion }
       : undefined;
-    const result = await this.runtime.runSession({
+    const request = {
       runId,
       ...(definition ? { definition } : {}),
       ...(this.options.maxMessages === undefined ? {} : { maxMessages: this.options.maxMessages }),
       ...(input.history && input.history.length > 0 ? { history: input.history } : {}),
-    });
-    return { runId, result };
+    };
+    const runtime = this.runtime;
+
+    let session: ReturnType<AgentRuntime['createSession']> | null = null;
+    let abortReason: string | null = null;
+
+    this.queuedCount += 1;
+    const done = (async (): Promise<SessionResult> => {
+      const release = await runtime.acquire();
+      this.queuedCount -= 1;
+      try {
+        session = runtime.createSession(request);
+        if (abortReason) session.abort(abortReason);
+        return await session.run();
+      } finally {
+        release();
+      }
+    })();
+
+    const handle: RunHandle = {
+      runId,
+      done,
+      abort: (reason: string) => {
+        abortReason ??= reason;
+        session?.abort(reason);
+      },
+    };
+    this.handles.add(handle);
+    void done.finally(() => this.handles.delete(handle)).catch(() => undefined);
+    return handle;
+  }
+
+  async run(input: RunInput): Promise<StandaloneRun> {
+    const handle = await this.start(input);
+    return { runId: handle.runId, result: await handle.done };
+  }
+
+  /** 服务退出时中止所有排队与进行中的运行。 */
+  abortAll(reason: string): void {
+    for (const handle of this.handles) handle.abort(reason);
   }
 }

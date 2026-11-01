@@ -98,12 +98,46 @@ echo '{"text":"继续处理","threadId":"thread-1"}' | npm run standalone -- --a
 - 结果 JSON 写 stdout，运行日志写 stderr；退出码与 supervisor 路径一致：`0` 成功、`2` 结果未知、其他失败。
 - `--root` / `AGENT_RUN_ROOT` 指定运行根（默认 `./agent-runs`），`--keep-run` / `AGENT_KEEP_RUN=1` 保留本次 Session 目录。
 
+### 常驻本地服务
+
+加 `--serve` 后同一个 agent 常驻，外部系统通过 HTTP 提交运行：
+
+```bash
+npm run standalone -- --agent examples/local-assistant.json --serve --port 8788
+```
+
+```bash
+# 提交一次运行，立即返回 202
+curl -sS -X POST http://127.0.0.1:8788/runs \
+  -H 'content-type: application/json' \
+  -d '{"text":"检查一下工作目录","threadId":"thread-1"}'
+# {"runId":"run-..."}
+
+# 查状态、摘要、错误与 token 统计
+curl -sS http://127.0.0.1:8788/runs/run-...
+
+# 健康快照
+curl -sS http://127.0.0.1:8788/health
+# {"ok":true,"active":0,"queued":0}
+```
+
+- 只有三个接口：`POST /runs`、`GET /runs/:id`、`GET /health`；没有提交列表，状态直接来自本地运行账本。
+- 默认只监听 `127.0.0.1`。监听非回环地址时必须设 `AGENT_HTTP_TOKEN`，否则启动报错；设了令牌后所有接口都要求 `Authorization: Bearer <token>`。
+- 队列与并发复用 `AgentRuntime` 的信号量：`concurrency: 1` 时第二个请求返回 202 后在队列里等待，`/health` 会看到 `active: 1, queued: 1`。
+- 可选 `Idempotency-Key` 请求头：同一个 key 重复提交返回同一个 `runId`，不会重复执行。
+- 一个运行失败不影响其他运行，结果落在各自的运行记录里。
+- `SIGTERM` / `SIGINT`：停止接新请求（`503`）→ 等待在跑的 Session 收尾（默认 15 秒）→ 超时后中止剩余运行再退出。
+- 请求体上限 1 MiB，超出返回 `413`；非法 JSON / 缺少 `text` 返回 `400`。
+
 ### 独立运行环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `AGENT_RUN_ROOT` | `./agent-runs` | 本地运行目录根，状态在 `<root>/.local/` |
 | `AGENT_KEEP_RUN` | `0` | `1` 保留运行目录，便于排查 |
+| `AGENT_HTTP_TOKEN` | 无 | `--serve` 的 Bearer 令牌；监听非回环地址时必填 |
+| `AGENT_IDLE_MS` | `0` | 服务空闲多久自动退出；`0` 表示常驻 |
+| `AGENT_SHUTDOWN_GRACE_MS` | `15000` | 退出信号后等待运行收尾的时间，之后中断剩余 Session |
 
 模型密钥沿用 `provider.apiKeyEnv` 里写的变量名（如 `ANTHROPIC_API_KEY`），值只从当前进程环境读取。
 
@@ -212,6 +246,7 @@ npm run check
 - `tests/runtime.test.ts`：同一 AgentRuntime 顺序 / 并发跑多个 Session，目录、信箱与并发上限；
 - `tests/local-transport.test.ts`：本地信箱的租约、ack/nack、并发拉取、落盘恢复与运行账本；
 - `tests/standalone.test.ts`：定义文件默认值与校验、独立运行的脚本/文本完成策略、工具降级与 CLI 输出；
+- `tests/standalone-serve.test.ts`：本地服务的提交/查询、并发限制、失败隔离、Bearer 鉴权、幂等键与 SIGTERM 收尾；
 - `tests/worker.test.ts`：跨进程验证一个 worker 并发跑两个 Session、一个失败不影响另一个，以及 SIGTERM 后的收尾与消息退回；`sessionIsolation: 'process'` 下同样的并发用例换到两个 Session 子进程里跑，另含子进程 SIGTERM 中断与崩溃（`outcome_unknown`）的用例；
 - `tests/supervisor.test.ts`：跨进程跑一个 script 智能体，验证接活、提交、ack、收尾与目录回收；
 - `tests/tools.test.ts`：工具层与外部 Agent 的接口对齐（待办、拒绝、评论、开放池、文件）；
