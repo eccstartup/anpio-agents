@@ -21,6 +21,19 @@ anpio-collab（控制面）                 anpio-agents（执行引擎）
 
 空闲超过 `COLLAB_AGENT_IDLE_MS` 后 worker 自行退出，supervisor 下次有活再拉起；定义变更时 supervisor 会在 worker 空闲后重建它。
 
+## Session 隔离级别
+
+定义里可以用 `sessionIsolation` 选择 Session 的执行方式：
+
+```json
+{ "sessionIsolation": "process" }
+```
+
+- `inline`（缺省）：Session 在 `agent-worker` 进程内并发，最省资源，保持既有行为。
+- `process`：worker 为每个 Session 拉起一个 `src/session.ts` 子进程，连接信息与派生令牌仍走 stdin，不进入环境变量。子进程跑的是同一套 `AgentSession`，所以独立目录、ack/nack、`finish`、中断后退回消息的语义与 inline 完全一致；worker 负责转发子进程的 stderr、汇总 `session-end`，并在超时或中断时杀掉整个进程组。子进程在没有交出结果的情况下退出时，该运行按 `outcome_unknown` 收尾，已拉取的消息带长退避退回队列。
+
+两种模式只改这一个字段，`concurrency` 的含义不变。进程隔离能挡住单个 Session 崩溃或挂死对同 agent 其它 Session 的影响，但模型密钥与派生令牌仍在子进程内存里；需要更强隔离时仍应把整套服务放进容器或独立用户下运行。进程模式每次运行多一次 Node 启动开销，适合工具副作用较重、值得隔离的定义。
+
 ## 要求
 
 - Node.js ≥ 22.18（直接运行 TypeScript，无需构建）
@@ -164,7 +177,7 @@ npm run check
 ```
 
 - `tests/runtime.test.ts`：同一 AgentRuntime 顺序 / 并发跑多个 Session，目录、信箱与并发上限；
-- `tests/worker.test.ts`：跨进程验证一个 worker 并发跑两个 Session、一个失败不影响另一个，以及 SIGTERM 后的收尾与消息退回；
+- `tests/worker.test.ts`：跨进程验证一个 worker 并发跑两个 Session、一个失败不影响另一个，以及 SIGTERM 后的收尾与消息退回；`sessionIsolation: 'process'` 下同样的并发用例换到两个 Session 子进程里跑，另含子进程 SIGTERM 中断与崩溃（`outcome_unknown`）的用例；
 - `tests/supervisor.test.ts`：跨进程跑一个 script 智能体，验证接活、提交、ack、收尾与目录回收；
 - `tests/tools.test.ts`：工具层与外部 Agent 的接口对齐（待办、拒绝、评论、开放池、文件）；
 - `tests/brains.test.ts`：各模型协议的请求形状与工具调用解析；

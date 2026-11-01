@@ -1,5 +1,6 @@
 /**
  * P2：同一 agent 的 worker 并发承载多个 Session。
+ * P5：同一套用例在 inline 与 process 两种隔离级别下都要成立。
  *
  * 平台桩同时保存两条待处理消息与两次运行：定义 concurrency=2 时 supervisor
  * 应一次下发两个 run，worker 并发处理；其中一个写请求在传输层失败
@@ -15,14 +16,14 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { EmbeddedAgentDefinition } from '../src/definition.ts';
+import type { EmbeddedAgentDefinition, SessionIsolation } from '../src/definition.ts';
 
 const SECRET = 'embedded-test-secret-0123456789abcdef';
 const ADMIN_TOKEN = 'admin-test-token';
 const AGENT_ID = 'agent1';
 const SUPERVISOR = fileURLToPath(new URL('../src/supervisor.ts', import.meta.url));
 
-function definition(): EmbeddedAgentDefinition {
+function definition(isolation?: SessionIsolation): EmbeddedAgentDefinition {
   const now = new Date().toISOString();
   return {
     id: AGENT_ID,
@@ -48,6 +49,7 @@ function definition(): EmbeddedAgentDefinition {
     sandbox: { shell: false, shellTimeoutMs: 5_000, maxOutputBytes: 16_384 },
     enabled: true,
     concurrency: 2,
+    ...(isolation ? { sessionIsolation: isolation } : {}),
     createdBy: null,
     createdAt: now,
     updatedAt: now,
@@ -111,8 +113,13 @@ function spawnSupervisor(env: Record<string, string>, args: string[] = []) {
   };
 }
 
-async function startStub(options: { delayMailMs?: number; messages?: number } = {}): Promise<Stub> {
-  const agent = definition();
+async function startStub(options: {
+  delayMailMs?: number;
+  messages?: number;
+  isolation?: SessionIsolation;
+  definition?: EmbeddedAgentDefinition;
+} = {}): Promise<Stub> {
+  const agent = options.definition ?? definition(options.isolation);
   const state = {
     messages: [
       { id: 'm1', refId: 'st1', leasedBy: null, acked: false, nacked: [] },
@@ -320,6 +327,144 @@ test('worker：同一 agent 并发两个 Session，一个失败不影响另一�
     // worker 只有一个：两个 Session 在同一个常驻进程里跑。
     const started = result.output.split('\n').filter(line => line.startsWith('▶')).length;
     assert.ok(started >= 3, result.output); // worker 启动 + 两个 session-start
+  } finally {
+    await stub.close();
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test('worker：process 隔离下并发两个 Session，一个失败不影响另一个', { timeout: 60_000 }, async () => {
+  const stub = await startStub({ isolation: 'process' });
+  const runRoot = mkdtempSync(join(tmpdir(), 'anpio-process-'));
+  try {
+    const supervisor = spawnSupervisor(
+      {
+        COLLAB_BASE_URL: stub.url,
+        COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
+        COLLAB_EMBEDDED_SECRET: SECRET,
+        COLLAB_RUNTIME_TICK_MS: '200',
+        COLLAB_RUNTIME_CONCURRENCY: '4',
+        COLLAB_RUN_ROOT: runRoot,
+      },
+      ['--once', '--agent', AGENT_ID],
+    );
+    const result = await supervisor.exit();
+
+    assert.equal(result.code, 0, result.output);
+    assert.equal(stub.runs.length, 2, result.output);
+    assert.deepEqual(
+      stub.runs.map(run => stub.finished.get(run.id)?.status).sort(),
+      ['outcome_unknown', 'succeeded'],
+      result.output,
+    );
+    // 生命周期与 inline 一致：成功的已确认，失败的长退避退回队列。
+    assert.equal(stub.messages.find(item => item.id === 'm1')?.acked, true);
+    assert.equal(stub.messages.find(item => item.id === 'm2')?.acked, false);
+    assert.ok((stub.messages.find(item => item.id === 'm2')?.nacked[0] ?? 0) >= 300, JSON.stringify(stub.messages));
+
+    // 两次运行在两个独立子进程里，各用各的目录与信箱，并且确实同时在跑。
+    assert.ok(stub.logs.some(line => line.includes('sessions/run1')), stub.logs.join('\n'));
+    assert.ok(stub.logs.some(line => line.includes('sessions/run2')), stub.logs.join('\n'));
+    assert.equal(stub.maxOpenSessions, 2, result.output);
+    assert.equal(existsSync(join(runRoot, AGENT_ID, 'sessions', 'run1')), false);
+    assert.equal(existsSync(join(runRoot, AGENT_ID, 'sessions', 'run2')), false);
+    const pids = [...result.output.matchAll(/独立进程中运行（pid (\d+)）/g)].map(match => match[1]);
+    assert.equal(pids.length, 2, result.output);
+    assert.notEqual(pids[0], pids[1]);
+  } finally {
+    await stub.close();
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test('worker：process 隔离下 SIGTERM 中断子进程，消息退回队列', { timeout: 60_000 }, async () => {
+  const stub = await startStub({ isolation: 'process', delayMailMs: 10_000 });
+  const runRoot = mkdtempSync(join(tmpdir(), 'anpio-process-shutdown-'));
+  const supervisor = spawnSupervisor(
+    {
+      COLLAB_BASE_URL: stub.url,
+      COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
+      COLLAB_EMBEDDED_SECRET: SECRET,
+      COLLAB_RUNTIME_TICK_MS: '200',
+      COLLAB_RUNTIME_CONCURRENCY: '4',
+      COLLAB_WORKER_GRACE_MS: '300',
+      COLLAB_RUN_ROOT: runRoot,
+    },
+    ['--agent', AGENT_ID],
+  );
+  const { child } = supervisor;
+  const snapshot = (): string => supervisor.output;
+  try {
+    await waitFor(() => stub.mailFetched, 15_000, snapshot());
+
+    child.kill('SIGTERM');
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`supervisor 未退出：${snapshot()}`)), 20_000);
+      child.on('exit', exitCode => {
+        clearTimeout(timer);
+        resolve(exitCode);
+      });
+    });
+    assert.equal(code, 0, snapshot());
+
+    const finishedRuns = stub.runs.map(run => stub.finished.get(run.id));
+    assert.ok(finishedRuns.length >= 1, snapshot());
+    assert.ok(
+      finishedRuns.every(run => run?.status === 'failed'),
+      JSON.stringify(finishedRuns),
+    );
+    assert.ok(
+      finishedRuns.some(run => /中断/.test(String(run?.error ?? ''))),
+      JSON.stringify(finishedRuns),
+    );
+    // 子进程收到 SIGTERM 后自己 nack，不需要等租约到期。
+    assert.equal(stub.messages.some(message => message.acked), false, JSON.stringify(stub.messages));
+    assert.ok(
+      stub.messages.some(message => (message.nacked[0] ?? 0) >= 300),
+      JSON.stringify(stub.messages),
+    );
+    assert.equal(existsSync(join(runRoot, AGENT_ID, 'sessions', stub.runs[0]!.id)), false);
+  } finally {
+    child.kill('SIGKILL');
+    await stub.close();
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test('worker：process 子进程崩溃时运行标 outcome_unknown 并退回消息', { timeout: 60_000 }, async () => {
+  // 让 Session 子进程在第一轮工具调用里杀掉自己，模拟进程崩溃（不是优雅退出）。
+  const crashing = definition('process');
+  crashing.provider.script = [{ tool: 'shell', input: { command: 'kill -9 $PPID' } }];
+  crashing.tools = ['shell'];
+  crashing.sandbox = { ...crashing.sandbox, shell: true };
+
+  const stub = await startStub({ messages: 1, definition: crashing });
+  const runRoot = mkdtempSync(join(tmpdir(), 'anpio-process-crash-'));
+  try {
+    const supervisor = spawnSupervisor(
+      {
+        COLLAB_BASE_URL: stub.url,
+        COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
+        COLLAB_EMBEDDED_SECRET: SECRET,
+        COLLAB_RUNTIME_TICK_MS: '200',
+        COLLAB_RUNTIME_CONCURRENCY: '4',
+        COLLAB_RUN_ROOT: runRoot,
+      },
+      ['--once', '--agent', AGENT_ID],
+    );
+    const result = await supervisor.exit();
+
+    assert.equal(result.code, 0, result.output);
+    assert.equal(stub.runs.length, 1, result.output);
+    const finished = stub.finished.get(stub.runs[0]!.id);
+    assert.equal(finished?.status, 'outcome_unknown', result.output);
+    assert.match(String(finished?.error ?? ''), /异常退出/, result.output);
+
+    // 父进程从子进程报告的已拉取消息里退回，带长退避，和同进程的 outcome_unknown 一致。
+    const message = stub.messages.find(item => item.id === 'm1');
+    assert.equal(message?.acked, false, JSON.stringify(stub.messages));
+    assert.ok((message?.nacked[0] ?? 0) >= 3_600, JSON.stringify(stub.messages));
+    assert.equal(existsSync(join(runRoot, AGENT_ID, 'sessions', stub.runs[0]!.id)), false);
   } finally {
     await stub.close();
     rmSync(runRoot, { recursive: true, force: true });

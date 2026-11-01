@@ -9,11 +9,12 @@
 import { brainFor } from '../brains/index.ts';
 import type { Brain, ToolSpec } from '../brains/types.ts';
 import { CollabClient } from '../client.ts';
-import type { EmbeddedAgentDefinition } from '../definition.ts';
+import type { EmbeddedAgentDefinition, SessionIsolation } from '../definition.ts';
 import { ensureAgentRoot } from '../sandbox.ts';
 import { createTools } from '../tools.ts';
+import { ProcessSession } from './process-session.ts';
 import { AgentSession } from './session.ts';
-import type { SessionRequest, SessionResult } from './types.ts';
+import type { SessionRequest, SessionResult, SessionTask } from './types.ts';
 
 export type AgentRuntimeOptions = {
   baseUrl: string;
@@ -32,6 +33,9 @@ export class AgentRuntime {
   readonly client: CollabClient;
   /** `<runRoot>/<agentId>/`，跨 Session 的目录根。 */
   readonly root: string;
+  /** 进程隔离模式下要原样交给 Session 子进程的连接信息。 */
+  readonly baseUrl: string;
+  readonly token: string;
 
   private brainInstance: Brain | null;
   private specsCache: ToolSpec[] | null = null;
@@ -44,6 +48,8 @@ export class AgentRuntime {
     this.definition = options.definition;
     this.client = options.client ?? new CollabClient(options.baseUrl, options.token, { timeoutMs: 20_000 });
     this.root = root;
+    this.baseUrl = options.baseUrl;
+    this.token = options.token;
     this.brainInstance = options.brain ?? null;
   }
 
@@ -108,6 +114,20 @@ export class AgentRuntime {
 
   createSession(request: SessionRequest): AgentSession {
     return new AgentSession(this, request);
+  }
+
+  /** 定义里的隔离级别；缺省 inline，老定义行为不变。 */
+  get isolation(): SessionIsolation {
+    return this.definition.sessionIsolation === 'process' ? 'process' : 'inline';
+  }
+
+  /**
+   * worker 用的入口：按定义选择同进程 Session 或子进程 Session。
+   * `runSession` 与 `session.ts` 入口保持 inline，避免子进程再套子进程。
+   */
+  createSessionTask(request: SessionRequest): SessionTask {
+    const isolation = request.definition?.sessionIsolation ?? this.isolation;
+    return isolation === 'process' ? new ProcessSession(this, request) : this.createSession(request);
   }
 
   /** 取一个并发槽位；超出配额时排队，不拒绝。 */

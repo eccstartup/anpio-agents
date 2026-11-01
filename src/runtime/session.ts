@@ -27,6 +27,7 @@ export class AgentSession {
   private readonly client: CollabClient;
   private readonly logger: RunLogger;
   private readonly log: RunLog;
+  private readonly onMailPulled: SessionRequest['onMailPulled'];
   private readonly deadline = new AbortController();
 
   private timer: NodeJS.Timeout | null = null;
@@ -44,6 +45,7 @@ export class AgentSession {
     this.definition = request.definition ?? runtime.definition;
     this.maxMessages = request.maxMessages ?? MAX_MESSAGES;
     this.client = runtime.client;
+    this.onMailPulled = request.onMailPulled;
     this.logger = createRunLog(this.client, this.runId);
     this.log = this.logger.log;
   }
@@ -124,6 +126,7 @@ export class AgentSession {
         return result;
       }
 
+      await this.onMailPulled?.(pulled);
       this.log('info', `拉到 ${pulled.length} 条消息：${pulled.map(item => item.kind).join(', ')}`);
 
       const parts: string[] = [];

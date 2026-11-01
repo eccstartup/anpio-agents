@@ -43,6 +43,11 @@ export const EMBEDDED_TOOLS = [
 
 export type EmbeddedTool = (typeof EMBEDDED_TOOLS)[number];
 
+export const SESSION_ISOLATIONS = ['inline', 'process'] as const;
+
+/** inline：Session 在 worker 进程内并发；process：每个 Session 一个子进程。 */
+export type SessionIsolation = (typeof SESSION_ISOLATIONS)[number];
+
 export type AgentScope =
   | 'tasks:read'
   | 'tasks:submit'
@@ -94,6 +99,8 @@ export type EmbeddedAgentDefinition = {
   sandbox: EmbeddedSandbox;
   enabled: boolean;
   concurrency: number;
+  /** 缺省 inline，保持既有行为；process 让每个 Session 跑在独立子进程里。 */
+  sessionIsolation?: SessionIsolation;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;

@@ -7,13 +7,14 @@
  *
  * 并发上限来自定义里的 `concurrency`。空闲超过 idleMs 自行退出，supervisor
  * 下次有活时再拉起；定义变更由 supervisor 在空闲时重建。
+ * `definition.sessionIsolation` 为 `process` 时，每个 Session 改为一个子进程，
+ * worker 仍然负责并发配额、session-end 汇总与中断。
  */
 
 import { createInterface } from 'node:readline';
 import type { EmbeddedAgentDefinition } from './definition.ts';
 import { AgentRuntime } from './runtime/agent.ts';
-import type { AgentSession } from './runtime/session.ts';
-import type { SessionOutcome } from './runtime/types.ts';
+import type { SessionOutcome, SessionTask } from './runtime/types.ts';
 
 type WorkerConfig = {
   type: 'config';
@@ -44,7 +45,7 @@ class AgentWorker {
   private readonly runtime: AgentRuntime;
   private readonly idleMs: number;
   private readonly queue: string[] = [];
-  private readonly sessions = new Map<string, AgentSession>();
+  private readonly sessions = new Map<string, SessionTask>();
   private active = 0;
   private accepting = true;
   private idleTimer: NodeJS.Timeout | null = null;
@@ -111,7 +112,7 @@ class AgentWorker {
     while (this.active < this.runtime.concurrency && this.queue.length > 0) {
       const runId = this.queue.shift()!;
       this.active += 1;
-      const session = this.runtime.createSession({ runId });
+      const session = this.runtime.createSessionTask({ runId });
       this.sessions.set(runId, session);
       emit({ type: 'session-start', runId });
       void session
