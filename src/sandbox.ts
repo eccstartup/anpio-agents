@@ -28,13 +28,25 @@ export function runRoot(): string {
     : resolve(process.cwd(), 'collab-runs');
 }
 
-/** 每个 run 一个 0700 目录；agentId 与 runId 已由平台生成，这里再挡一层路径字符。 */
+/** 目录名来自平台，这里再挡一层路径字符；agentId 与 runId 都由平台生成。 */
+export function safeSegment(value: string): string {
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(value)) throw new Error('运行目录名不合法');
+  return value;
+}
+
+/**
+ * agent 级工作根：`<runRoot>/<agentId>/`，跨 Session 存在。
+ * 每个 Session 在 `sessions/<runId>` 下工作，互不共享目录。
+ */
+export async function ensureAgentRoot(agentId: string): Promise<string> {
+  const dir = join(runRoot(), safeSegment(agentId));
+  await fs.mkdir(join(dir, 'sessions'), { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+/** 每个 Session 一个 0700 目录，结束即清理。 */
 export async function createRunDir(agentId: string, runId: string): Promise<string> {
-  const safeSegment = (value: string) => {
-    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(value)) throw new Error('运行目录名不合法');
-    return value;
-  };
-  const dir = join(runRoot(), safeSegment(agentId), safeSegment(runId));
+  const dir = join(runRoot(), safeSegment(agentId), 'sessions', safeSegment(runId));
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.mkdir(join(dir, 'tmp'), { recursive: true, mode: 0o700 });
   return dir;

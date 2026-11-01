@@ -50,7 +50,7 @@ function definition(): EmbeddedAgentDefinition & { unread: number; running: numb
       ],
     },
     systemPrompt: '',
-    tools: ['task_accept', 'task_progress', 'task_submit', 'read_file', 'write_file', 'list_files'],
+    tools: ['task_accept', 'task_progress', 'task_submit', 'read_file', 'write_file', 'list_files', 'finish'],
     scopes: ['tasks:read', 'tasks:submit', 'comments:write', 'mailbox:read', 'mailbox:write'],
     limits: { maxTurns: 10, timeoutMs: 30_000, maxTokens: 1_024 },
     sandbox: { shell: false, shellTimeoutMs: 5_000, maxOutputBytes: 16_384 },
@@ -208,7 +208,7 @@ test('supervisor：脚本智能体跨进程接活、提交并收尾', { timeout:
 
     assert.equal(result.code, 0, result.output);
     assert.equal(stub.finished?.status, 'succeeded', JSON.stringify(stub.finished));
-    assert.equal(stub.finished?.turns, 1);
+    assert.equal(stub.finished?.turns, 4);
     assert.equal(stub.finished?.outcomeUnknown, false);
     assert.equal((stub.submitted as { summary?: string } | null)?.summary, '库存核对完成');
     assert.equal(stub.acked.length, 1);
