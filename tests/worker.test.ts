@@ -82,13 +82,42 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function startStub(options: { delayMailMs?: number } = {}): Promise<Stub> {
+async function waitFor(predicate: () => boolean, timeoutMs: number, label: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await sleep(50);
+  assert.equal(predicate(), true, label);
+}
+
+function spawnSupervisor(env: Record<string, string>, args: string[] = []) {
+  const child = spawn(
+    process.execPath,
+    ['--disable-warning=ExperimentalWarning', SUPERVISOR, ...args],
+    { cwd: process.cwd(), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let output = '';
+  child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
+  child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
+  return {
+    child,
+    get output() {
+      return output;
+    },
+    async exit(): Promise<{ code: number; output: string }> {
+      return await new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('exit', code => resolve({ code: code ?? 1, output }));
+      });
+    },
+  };
+}
+
+async function startStub(options: { delayMailMs?: number; messages?: number } = {}): Promise<Stub> {
   const agent = definition();
   const state = {
     messages: [
       { id: 'm1', refId: 'st1', leasedBy: null, acked: false, nacked: [] },
       { id: 'm2', refId: 'st2', leasedBy: null, acked: false, nacked: [] },
-    ] as Message[],
+    ].slice(0, options.messages ?? 2) as Message[],
     runs: [] as Run[],
     finished: new Map<string, Record<string, unknown>>(),
     logs: [] as string[],
@@ -256,30 +285,18 @@ test('worker：同一 agent 并发两个 Session，一个失败不影响另一�
   const stub = await startStub();
   const runRoot = mkdtempSync(join(tmpdir(), 'anpio-worker-'));
   try {
-    const result = await new Promise<{ code: number; output: string }>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        ['--disable-warning=ExperimentalWarning', SUPERVISOR, '--once', '--agent', AGENT_ID],
-        {
-          cwd: process.cwd(),
-          env: {
-            ...process.env,
-            COLLAB_BASE_URL: stub.url,
-            COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
-            COLLAB_EMBEDDED_SECRET: SECRET,
-            COLLAB_RUNTIME_TICK_MS: '200',
-            COLLAB_RUNTIME_CONCURRENCY: '4',
-            COLLAB_RUN_ROOT: runRoot,
-          },
-          stdio: ['ignore', 'pipe', 'pipe'],
-        },
-      );
-      let output = '';
-      child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-      child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-      child.on('error', reject);
-      child.on('exit', code => resolve({ code: code ?? 1, output }));
-    });
+    const supervisor = spawnSupervisor(
+      {
+        COLLAB_BASE_URL: stub.url,
+        COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
+        COLLAB_EMBEDDED_SECRET: SECRET,
+        COLLAB_RUNTIME_TICK_MS: '200',
+        COLLAB_RUNTIME_CONCURRENCY: '4',
+        COLLAB_RUN_ROOT: runRoot,
+      },
+      ['--once', '--agent', AGENT_ID],
+    );
+    const result = await supervisor.exit();
 
     assert.equal(result.code, 0, result.output);
     assert.equal(stub.runs.length, 2, result.output);
@@ -312,43 +329,34 @@ test('worker：同一 agent 并发两个 Session，一个失败不影响另一�
 test('worker：SIGTERM 优雅退出，未完成的运行退回消息', { timeout: 60_000 }, async () => {
   const stub = await startStub({ delayMailMs: 10_000 });
   const runRoot = mkdtempSync(join(tmpdir(), 'anpio-shutdown-'));
-  const child = spawn(
-    process.execPath,
-    ['--disable-warning=ExperimentalWarning', SUPERVISOR, '--agent', AGENT_ID],
+  const supervisor = spawnSupervisor(
     {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        COLLAB_BASE_URL: stub.url,
-        COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
-        COLLAB_EMBEDDED_SECRET: SECRET,
-        COLLAB_RUNTIME_TICK_MS: '200',
-        COLLAB_RUNTIME_CONCURRENCY: '4',
-        COLLAB_WORKER_GRACE_MS: '300',
-        COLLAB_RUN_ROOT: runRoot,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      COLLAB_BASE_URL: stub.url,
+      COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
+      COLLAB_EMBEDDED_SECRET: SECRET,
+      COLLAB_RUNTIME_TICK_MS: '200',
+      COLLAB_RUNTIME_CONCURRENCY: '4',
+      COLLAB_WORKER_GRACE_MS: '300',
+      COLLAB_RUN_ROOT: runRoot,
     },
+    ['--agent', AGENT_ID],
   );
-  let output = '';
-  child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-  child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
+  const { child } = supervisor;
+  const snapshot = (): string => supervisor.output;
   try {
-    const deadline = Date.now() + 15_000;
-    while (!stub.mailFetched && Date.now() < deadline) await sleep(50);
-    assert.equal(stub.mailFetched, true, output);
+    await waitFor(() => stub.mailFetched, 15_000, snapshot());
 
     child.kill('SIGTERM');
     const code = await new Promise<number | null>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`supervisor 未退出：${output}`)), 20_000);
+      const timer = setTimeout(() => reject(new Error(`supervisor 未退出：${snapshot()}`)), 20_000);
       child.on('exit', exitCode => {
         clearTimeout(timer);
         resolve(exitCode);
       });
     });
-    assert.equal(code, 0, output);
+    assert.equal(code, 0, snapshot());
 
-    assert.ok(stub.runs.length >= 1, output);
+    assert.ok(stub.runs.length >= 1, snapshot());
     const finishedRuns = stub.runs.map(run => stub.finished.get(run.id));
     assert.ok(
       finishedRuns.every(run => run?.status === 'failed'),
@@ -368,6 +376,45 @@ test('worker：SIGTERM 优雅退出，未完成的运行退回消息', { timeout
     assert.equal(existsSync(join(runRoot, AGENT_ID, 'sessions', stub.runs[0]!.id)), false);
   } finally {
     child.kill('SIGKILL');
+    await stub.close();
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test('worker：空闲超过 TTL 自行退出，supervisor 不重新拉起', { timeout: 60_000 }, async () => {
+  const stub = await startStub({ messages: 1 });
+  const runRoot = mkdtempSync(join(tmpdir(), 'anpio-idle-'));
+  const supervisor = spawnSupervisor(
+    {
+      COLLAB_BASE_URL: stub.url,
+      COLLAB_RUNTIME_TOKEN: ADMIN_TOKEN,
+      COLLAB_EMBEDDED_SECRET: SECRET,
+      COLLAB_RUNTIME_TICK_MS: '200',
+      COLLAB_RUNTIME_CONCURRENCY: '4',
+      COLLAB_AGENT_IDLE_MS: '500',
+      COLLAB_RUN_ROOT: runRoot,
+    },
+    ['--agent', AGENT_ID],
+  );
+  try {
+    await waitFor(() => stub.finished.size === 1, 15_000, supervisor.output);
+    await waitFor(() => supervisor.output.includes('空闲退出'), 15_000, supervisor.output);
+
+    // 没有新消息时不重新拉起；worker 的目录也已清掉。
+    await sleep(1_000);
+    assert.equal(supervisor.output.includes('worker 已启动'), true);
+    assert.equal(
+      supervisor.output.split('worker 已启动').length - 1,
+      1,
+      supervisor.output,
+    );
+    assert.equal(existsSync(join(runRoot, AGENT_ID, 'sessions', stub.runs[0]!.id)), false);
+
+    supervisor.child.kill('SIGTERM');
+    const result = await supervisor.exit();
+    assert.equal(result.code, 0, result.output);
+  } finally {
+    supervisor.child.kill('SIGKILL');
     await stub.close();
     rmSync(runRoot, { recursive: true, force: true });
   }
