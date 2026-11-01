@@ -404,6 +404,15 @@ export class AgentStore {
     ).changes;
   }
 
+  /** 关闭一轮时只释放这一轮拿到的租约，不碰同 thread 的其它会话。 */
+  releaseLease(deliveryId: string): number {
+    return this.db.run(
+      `UPDATE inbox SET lease_until = NULL, lease_token = NULL
+       WHERE status = 'pending' AND lease_token = ?`,
+      deliveryId,
+    ).changes;
+  }
+
   pendingInboxCount(threadId?: string): number {
     return Number(
       (threadId
