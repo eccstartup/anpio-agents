@@ -92,14 +92,14 @@ test('定义加载器：OpenAI 兼容供应商可覆盖 baseUrl（如 DeepSeek�
       provider: {
         protocol: 'openai-chat',
         baseUrl: 'https://api.deepseek.com/v1',
-        model: 'deepseek-chat',
+        model: 'deepseek-flash',
         apiKeyEnv: envName,
       },
       tools: ['finish'],
     });
     const definition = await loadDefinition(file);
     assert.equal(definition.provider.baseUrl, 'https://api.deepseek.com/v1');
-    assert.equal(definition.provider.model, 'deepseek-chat');
+    assert.equal(definition.provider.model, 'deepseek-flash');
     assert.equal(definition.provider.apiKeyEnv, envName);
   } finally {
     if (previous === undefined) delete process.env[envName];

@@ -6,7 +6,7 @@
     "id": "deepseek",
     "protocol": "openai-chat",
     "baseUrl": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
+    "model": "deepseek-flash",
     "apiKeyEnv": "DEEPSEEK_API_KEY"
   },
   "systemPrompt": "你是一个独立运行的助手。先确认目标，再动手；结论要能直接使用。",
