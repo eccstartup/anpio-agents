@@ -9,6 +9,7 @@
   },
   "scripts": {
     "runtime": "node --disable-warning=ExperimentalWarning src/supervisor.ts",
+    "worker": "node --disable-warning=ExperimentalWarning src/agent-worker.ts",
     "session": "node --disable-warning=ExperimentalWarning src/session.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "check": "tsc --noEmit"

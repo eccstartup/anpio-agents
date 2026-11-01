@@ -6,12 +6,14 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createRunDir,
+  ensureAgentRoot,
   listFilesInside,
+  pruneSessionDirs,
   readFileInside,
   removeRunDir,
   resolveInside,
@@ -119,5 +121,22 @@ test('沙箱：超时杀掉进程组，输出按上限截断', { timeout: 20_000
 test('沙箱：runRoot 跟随 COLLAB_RUN_ROOT', async () => {
   await withRoot(async root => {
     assert.equal(runRoot(), root);
+  });
+});
+
+test('沙箱：启动时只回收过期的 Session 目录', async () => {
+  await withRoot(async root => {
+    const agentRoot = await ensureAgentRoot('agent-d');
+    const fresh = await createRunDir('agent-d', 'run-new');
+    const stale = await createRunDir('agent-d', 'run-old');
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    utimesSync(stale, old, old);
+
+    assert.equal(await pruneSessionDirs(60 * 60 * 1_000), 1);
+    assert.equal(existsSync(stale), false);
+    assert.equal(existsSync(fresh), true);
+    // agent 级工作根保留，别的进程刚创建的目录也不动。
+    assert.equal(existsSync(agentRoot), true);
+    assert.equal(existsSync(join(root, 'agent-d', 'sessions')), true);
   });
 });

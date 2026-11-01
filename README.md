@@ -1,16 +1,25 @@
 # anpio-agents
 
-[anpio-collab](https://github.com/eccstartup/anpio-collab) 的**执行引擎**：平台的 supervisor、一次性 session、工具层、沙箱与模型协议适配器。
+[anpio-collab](https://github.com/eccstartup/anpio-collab) 的**执行引擎**：平台的 supervisor、常驻 agent worker、工具层、沙箱与模型协议适配器。
 
 平台负责“定义、身份、运行记录”，这里负责“真的跑一轮”。两边只通过 HTTP 接口相连，不共享数据库。
 
 ```text
 anpio-collab（控制面）                 anpio-agents（执行引擎）
-定义校验 / 派生令牌 / 运行记录  ←HTTP→  supervisor 常驻，有未读才 spawn
-控制台 / 保留期回收                     └─ session：拉信封 → 模型循环 → 工具 → ack → finish
+定义校验 / 派生令牌 / 运行记录  ←HTTP→  supervisor 常驻，按定义拉起 worker
+控制台 / 保留期回收                       └─ agent-worker：一个定义一个进程
+                                             └─ Session × N：信箱 → 模型循环 → 工具 → ack → finish
 ```
 
 不启动 supervisor 时，平台照常工作，只是内嵌 Agent 不会被执行。
+
+## 三层结构
+
+- **supervisor**（`src/supervisor.ts`）：发现定义、创建运行、全局并发、心跳、`recover`、运行生命周期与日志前缀；不加载模型，也不持有运行上下文。
+- **AgentRuntime**（`src/runtime/agent.ts`）：一个定义的执行身份——派生令牌、模型适配器、工具清单、agent 工作根与并发信号量；跨 Session 常驻。
+- **Session**（`src/runtime/session.ts`）：一次运行的可并发上下文——自己的信箱会话、消息、目录、deadline、中断信号与 token 统计。Session 之间不共享可变状态，一个失败不影响同 agent 的另一个。
+
+空闲超过 `COLLAB_AGENT_IDLE_MS` 后 worker 自行退出，supervisor 下次有活再拉起；定义变更时 supervisor 会在 worker 空闲后重建它。
 
 ## 要求
 
@@ -43,22 +52,28 @@ npm run runtime -- --once
 npm run runtime -- --once --agent <agentId>
 ```
 
-也可以单独跑一次 session（调试用），supervisor 会通过 stdin 传入 `baseUrl`、派生令牌、`runId`、`agentId`、`workdir` 与 `definition`：
+也可以单独跑一次 session（调试用），supervisor 会通过 stdin 传入 `baseUrl`、派生令牌、`runId`、`agentId` 与 `definition`：
 
 ```bash
-echo '{"baseUrl":"http://127.0.0.1:8787","token":"...","runId":"...","agentId":"...","workdir":"/tmp/run","definition":{...}}' \
+echo '{"baseUrl":"http://127.0.0.1:8787","token":"...","runId":"...","agentId":"...","definition":{...}}' \
   | npm run session
 ```
+
+`npm run worker` 对应的 `src/agent-worker.ts` 由 supervisor 用 stdin 配置拉起，通常不需要单独运行。
 
 ### 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `COLLAB_BASE_URL` | `http://127.0.0.1:8787` | 平台地址 |
-| `COLLAB_RUNTIME_TOKEN` | 无 | 管理员令牌，用于拉定义、起运行；需要 `admin` |
+| `COLLAB_RUNTIME_TOKEN` | 无 | 管理员令牌，用于拉定义、起运行；需要 `admin`，不会传给 worker |
 | `COLLAB_EMBEDDED_SECRET` | 无 | 派生内置智能体令牌，必须与平台一致 |
 | `COLLAB_RUNTIME_TICK_MS` | `3000` | 扫描间隔，最小 200 |
-| `COLLAB_RUNTIME_CONCURRENCY` | `2` | supervisor 全局并发 |
+| `COLLAB_RUNTIME_CONCURRENCY` | `2` | 全局同时进行的 Session 数 |
+| `COLLAB_AGENT_IDLE_MS` | `60000` | worker 空闲多久自行退出；`0` 表示不退出 |
+| `COLLAB_WORKER_GRACE_MS` | `20000` | 退出信号后等待运行收尾的时间，之后中断剩余 Session |
+| `COLLAB_ORPHAN_TTL_MS` | `86400000` | 启动时回收超过此时长的残留 Session 目录 |
+| `COLLAB_HEALTH_FILE` | 无 | 写一个 JSON 健康快照，供外部探针读取 |
 | `COLLAB_AGENTS_FILE` | 无 | 启动时同步的定义文件，见 `examples/agents.json` |
 | `COLLAB_RUN_ROOT` | `./collab-runs` | 运行目录根 |
 | `COLLAB_KEEP_RUN` | `0` | `1` 保留运行目录，便于排查 |
@@ -69,24 +84,26 @@ echo '{"baseUrl":"http://127.0.0.1:8787","token":"...","runId":"...","agentId":"
 ### supervisor 做什么
 
 - 每 `COLLAB_RUNTIME_TICK_MS` 扫一次定义列表，`enabled=false` 的不叫醒；
-- 有未读才 spawn 一个 `node src/session.ts`，跑完即退出，平时不加载模型；
+- 每个定义最多一个 `node src/agent-worker.ts` 子进程，跑完后常驻复用；
+- 有未读就建运行并下发；同一 agent 的并发受 `concurrency` 限制，全局受 `COLLAB_RUNTIME_CONCURRENCY` 限制（按 Session 计）；
 - 定期上报 supervisor 心跳，并调用平台的 `recover` 把心跳停滞的运行标成 `outcome_unknown`；
 - 接管控制台“立即运行”建出的、还没有心跳的运行；
-- 同一定义的并发受 `concurrency` 限制，全局受 `COLLAB_RUNTIME_CONCURRENCY` 限制；
-- 启动时若设了 `COLLAB_AGENTS_FILE`，按名称 upsert 定义。
+- worker 退出或被杀时，为它名下所有未结束的运行补一条结论（已开始 → `outcome_unknown`，未开始 → `failed`）；
+- 启动时若设了 `COLLAB_AGENTS_FILE`，按名称 upsert 定义；
+- 启动时清理超过 `COLLAB_ORPHAN_TTL_MS` 的 Session 目录；`SIGTERM` / `SIGINT` 后停止接活、等待收尾，未完成的运行会把消息退回队列。
 
 ## 一次运行
 
 ```text
-建运行记录 → 独立运行目录（0700）
+建运行记录 → Session 目录 <runRoot>/<agentId>/sessions/<runId>（0700）
   → 开信箱会话，拉信封 → 取正文
   → 写 AGENTS.md（任务、验收条件、消息）
   → 模型循环（最多 maxTurns）→ 调用工具
   → ack / nack 消息 → 提交结果 → finish
-  → 删除运行目录（COLLAB_KEEP_RUN=1 时保留）
+  → 删除 Session 目录（COLLAB_KEEP_RUN=1 时保留），agent 工作根保留
 ```
 
-退出码：`0` 成功；`2` 结果未知（`outcome_unknown`）；其他失败。超时由 `limits.timeoutMs` 控制，到点中止本轮并标记超时。
+退出码：`0` 成功；`2` 结果未知（`outcome_unknown`）；其他失败。超时由 `limits.timeoutMs` 控制，到点中止本轮并标记超时；被中断的运行记为 `failed`，未确认的消息退回队列。
 
 ## 工具：与外部 Agent 同一套能力
 
@@ -131,10 +148,11 @@ echo '{"baseUrl":"http://127.0.0.1:8787","token":"...","runId":"...","agentId":"
 
 ## 沙箱
 
-- 每次运行一个 `0700` 目录，路径不能跳出、拒绝符号链接；
-- shell 的 `HOME` / `TMPDIR` 指向运行目录，环境里没有平台令牌与模型密钥；
+- 每个 Session 一个 `0700` 目录，路径不能跳出、拒绝符号链接；
+- shell 的 `HOME` / `TMPDIR` 指向 Session 目录，环境里没有平台令牌与模型密钥；
 - 超时杀整个进程组，stdout/stderr 按上限截断；
-- `COLLAB_SANDBOX_EXEC=1` 时在 macOS 上额外用 `sandbox-exec`（默认拒绝网络，只允许写运行目录）。
+- 启动时回收超过 `COLLAB_ORPHAN_TTL_MS` 的残留 Session 目录，刚创建的不动；
+- `COLLAB_SANDBOX_EXEC=1` 时在 macOS 上额外用 `sandbox-exec`（默认拒绝网络，只允许写 Session 目录）。
 
 这是“防误伤”，不是容器级隔离。需要强隔离时，把 supervisor 放进容器或独立用户下运行，并限制网络出口。
 
@@ -145,18 +163,22 @@ npm test
 npm run check
 ```
 
+- `tests/runtime.test.ts`：同一 AgentRuntime 顺序 / 并发跑多个 Session，目录、信箱与并发上限；
+- `tests/worker.test.ts`：跨进程验证一个 worker 并发跑两个 Session、一个失败不影响另一个，以及 SIGTERM 后的收尾与消息退回；
 - `tests/supervisor.test.ts`：跨进程跑一个 script 智能体，验证接活、提交、ack、收尾与目录回收；
 - `tests/tools.test.ts`：工具层与外部 Agent 的接口对齐（待办、拒绝、评论、开放池、文件）；
 - `tests/brains.test.ts`：各模型协议的请求形状与工具调用解析；
-- `tests/sandbox.test.ts`：路径边界、环境清洗、超时与截断。
+- `tests/sandbox.test.ts`：路径边界、环境清洗、超时、截断与过期目录回收。
 
 ## 故障排查
 
 **提示需要 `COLLAB_RUNTIME_TOKEN`**：supervisor 用管理员令牌调平台接口，不能用派生令牌代替。
 
-**子进程 401**：两端的 `COLLAB_EMBEDDED_SECRET` 不一致，或平台没设。
+**worker 401**：两端的 `COLLAB_EMBEDDED_SECRET` 不一致，或平台没设。
 
-**运行记录一直 `running`**：看 supervisor 是否在跑、日志里有没有 `▶` / `■`；心跳停滞的运行会被 `recover` 标成 `outcome_unknown`，消息退回队列。
+**运行记录一直 `running`**：看 supervisor 是否在跑、日志里有没有 `▶` / `■`；心跳停滞的运行会被 `recover` 标成 `outcome_unknown`，消息退回队列。设了 `COLLAB_HEALTH_FILE` 时可以直接读快照看各 worker 的 `ready` / `sessions` / `pending`。
+
+**worker 反复重启**：看 stderr 里带 `[名称]` 前缀的诊断；定义变更会触发重建，异常退出会先补完运行结论再重新拉起。
 
 **控制台“立即运行”没动静**：控制台只建运行记录，需要有一个启用的 supervisor 连着同一平台。
 

@@ -151,6 +151,8 @@ export type RequestOptions = {
   body?: unknown;
   operationId?: string;
   expectedVersion?: number;
+  /** 外部取消信号（例如 Session 的 deadline）；与超时合并。 */
+  signal?: AbortSignal;
 };
 
 export type ClientOptions = { timeoutMs?: number };
@@ -186,11 +188,12 @@ export class CollabClient {
 
     let response: Response;
     try {
+      const timeout = AbortSignal.timeout(this.timeoutMs);
       response = await fetch(new URL(`/v1/${path}`, this.baseUrl), {
         method,
         headers,
         redirect: 'error',
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       });
     } catch (error) {
@@ -327,8 +330,9 @@ export class CollabClient {
       subscriptions?: { topic: string; mode?: 'fanout' | 'queue' }[];
     },
     operationId: string,
+    signal?: AbortSignal,
   ) {
-    return this.request<MailSession>('mail/sessions', { body: input, operationId });
+    return this.request<MailSession>('mail/sessions', { body: input, operationId, signal });
   }
 
   closeMailSession(sessionId: string) {
@@ -341,6 +345,7 @@ export class CollabClient {
   pullMail(
     sessionId: string,
     options: { limit?: number; leaseSeconds?: number; includeDigest?: boolean; since?: number; waitMs?: number } = {},
+    signal?: AbortSignal,
   ) {
     const params = new URLSearchParams();
     if (options.limit !== undefined) params.set('limit', String(options.limit));
@@ -351,11 +356,12 @@ export class CollabClient {
     const suffix = params.size ? `?${params}` : '';
     return this.request<{ items: MailEnvelope[]; cursor: number; session: MailSession }>(
       `mail/sessions/${encodeURIComponent(sessionId)}/messages${suffix}`,
+      { signal },
     );
   }
 
-  mailMessage(messageId: string) {
-    return this.request<MailMessage>(`mail/messages/${encodeURIComponent(messageId)}`);
+  mailMessage(messageId: string, signal?: AbortSignal) {
+    return this.request<MailMessage>(`mail/messages/${encodeURIComponent(messageId)}`, { signal });
   }
 
   ackMail(messageId: string, deliveryId: string, operationId = `mail:ack:${messageId}:${deliveryId}`) {

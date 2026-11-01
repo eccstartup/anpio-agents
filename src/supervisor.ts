@@ -1,18 +1,22 @@
 /**
  * 内嵌智能体 supervisor：常驻但不加载模型。
  *
- * 每个 tick 只做三件事：回收心跳停滞的运行、看哪些定义有未读、为它们各 spawn
- * 一个一次性的 session 子进程。空闲时它只是一个定时器，不持有智能体上下文。
+ * 每个定义对应一个 agent-worker 子进程，由 supervisor 按需拉起；worker 内部
+ * 在 `definition.concurrency` 以内并发跑多个 Session。supervisor 只做调度：
+ * 发现、放置、全局并发、心跳、recover、运行生命周期与日志前缀，
+ * 不持有模型密钥之外任何一次运行的上下文。
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CollabClient } from './client.ts';
-import type { EmbeddedAgentView } from './definition.ts';
-import { runRoot } from './sandbox.ts';
+import type { EmbeddedAgentDefinition, EmbeddedAgentView } from './definition.ts';
+import { pruneSessionDirs } from './sandbox.ts';
 import { deriveEmbeddedToken } from './token.ts';
 
 type RunView = {
@@ -33,6 +37,35 @@ type Options = {
   once: boolean;
   agentFilter: string | null;
   agentsFile: string | null;
+  idleMs: number;
+  graceMs: number;
+  healthFile: string | null;
+  orphanTtlMs: number;
+};
+
+type WorkerEvent = {
+  type?: string;
+  runId?: string;
+  status?: string;
+  turns?: number;
+  error?: string | null;
+  reason?: string;
+  concurrency?: number;
+};
+
+type WorkerHandle = {
+  agentId: string;
+  name: string;
+  child: ChildProcess;
+  hash: string;
+  /** worker 已报告的运行中 Session。 */
+  sessions: Set<string>;
+  /** 已下发、worker 还没报告开始或结束的运行。 */
+  pending: Set<string>;
+  timers: Map<string, NodeJS.Timeout>;
+  ready: boolean;
+  stopping: boolean;
+  lastActiveAt: number;
 };
 
 function options(): Options {
@@ -45,6 +78,12 @@ function options(): Options {
   if (!Number.isInteger(tickMs) || tickMs < 200) throw new Error('COLLAB_RUNTIME_TICK_MS 至少 200');
   const concurrency = Number(process.env.COLLAB_RUNTIME_CONCURRENCY ?? 2);
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('COLLAB_RUNTIME_CONCURRENCY 至少 1');
+  const idleMs = Number(process.env.COLLAB_AGENT_IDLE_MS ?? 60_000);
+  if (!Number.isInteger(idleMs) || idleMs < 0) throw new Error('COLLAB_AGENT_IDLE_MS 不能为负');
+  const graceMs = Number(process.env.COLLAB_WORKER_GRACE_MS ?? 20_000);
+  if (!Number.isInteger(graceMs) || graceMs < 0) throw new Error('COLLAB_WORKER_GRACE_MS 不能为负');
+  const orphanTtlMs = Number(process.env.COLLAB_ORPHAN_TTL_MS ?? 24 * 60 * 60 * 1_000);
+  if (!Number.isInteger(orphanTtlMs) || orphanTtlMs < 1_000) throw new Error('COLLAB_ORPHAN_TTL_MS 至少 1000');
 
   const args = process.argv.slice(2);
   let once = false;
@@ -67,6 +106,10 @@ function options(): Options {
     once,
     agentFilter,
     agentsFile: process.env.COLLAB_AGENTS_FILE ?? null,
+    idleMs,
+    graceMs,
+    healthFile: process.env.COLLAB_HEALTH_FILE ?? null,
+    orphanTtlMs,
   };
 }
 
@@ -85,16 +128,55 @@ function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** 定义快照：去掉随每次扫描变化的运行时字段，hash 才稳定。 */
+function snapshot(agent: EmbeddedAgentView): EmbeddedAgentDefinition {
+  const { unread: _unread, running: _running, ...definition } = agent;
+  return definition;
+}
+
+function definitionHash(definition: EmbeddedAgentDefinition): string {
+  return createHash('sha256').update(JSON.stringify(definition)).digest('hex').slice(0, 16);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 class Supervisor {
   private readonly client: CollabClient;
   private readonly settings: Options;
-  private readonly sessionPath: string;
-  private readonly children = new Map<string, { child: ChildProcess; startedAt: number }>();
+  private readonly workerPath: string;
+  private readonly workers = new Map<string, WorkerHandle>();
+  private readonly startedAt = Date.now();
 
   constructor(settings: Options) {
     this.settings = settings;
     this.client = new CollabClient(settings.baseUrl, settings.token, { timeoutMs: 20_000 });
-    this.sessionPath = fileURLToPath(new URL('./session.ts', import.meta.url));
+    this.workerPath = fileURLToPath(new URL('./agent-worker.ts', import.meta.url));
+  }
+
+  /** 可选的健康快照：外部探针读文件即可，写失败不影响调度。 */
+  async writeHealth(): Promise<void> {
+    const file = this.settings.healthFile;
+    if (!file) return;
+    const agents = [...this.workers.values()].map(handle => ({
+      agentId: handle.agentId,
+      name: handle.name,
+      ready: handle.ready,
+      stopping: handle.stopping,
+      sessions: [...handle.sessions],
+      pending: [...handle.pending],
+      lastActiveAt: new Date(handle.lastActiveAt).toISOString(),
+    }));
+    const payload = {
+      pid: process.pid,
+      startedAt: new Date(this.startedAt).toISOString(),
+      updatedAt: new Date().toISOString(),
+      workers: agents.length,
+      sessions: this.totalInFlight(),
+      agents,
+    };
+    await writeFile(file, `${JSON.stringify(payload)}\n`, { mode: 0o600 }).catch(() => undefined);
   }
 
   async heartbeat(): Promise<void> {
@@ -145,21 +227,48 @@ class Supervisor {
     for (const agent of agents) {
       if (!agent.enabled) continue;
       if (this.settings.agentFilter && agent.id !== this.settings.agentFilter) continue;
-      if (this.children.has(agent.id)) continue;
-      if (this.children.size >= this.settings.concurrency) break;
+
+      let handle = this.workers.get(agent.id) ?? null;
+      const definition = snapshot(agent);
+      if (handle && handle.stopping) handle = null;
+      if (handle && handle.hash !== definitionHash(definition)) {
+        if (this.inFlight(handle) === 0) {
+          this.stopWorker(handle, '定义已变更');
+          this.workers.delete(agent.id);
+          handle = null;
+        }
+      }
+
       if (agent.running > 0) {
         // 控制台点「立即运行」会先建一行运行记录。这里接管这种刚创建、
         // 还没有任何心跳的运行，否则它永远不会被真正执行。
         const manual = await this.orphanRun(agent.id);
-        if (manual) await this.launch(agent, manual);
-        continue;
+        if (manual && !this.isTracked(agent.id, manual.id) && !this.overCapacity()) {
+          handle ??= await this.spawnWorker(agent, definition);
+          if (handle) this.sendRun(handle, manual.id, agent.limits.timeoutMs);
+        }
       }
+
       if (agent.unread <= 0) continue;
-      await this.launch(agent);
+      const inFlight = handle ? this.inFlight(handle) : 0;
+      const slots = Math.min(
+        Math.max(0, agent.concurrency - inFlight),
+        Math.max(0, this.settings.concurrency - this.totalInFlight()),
+      );
+      // 已下发的运行还没开始拉取时 unread 不会减少，用 pending 去重。
+      const allowance = agent.unread - (handle?.pending.size ?? 0);
+      for (let index = 0; index < Math.min(slots, Math.max(0, allowance)); index += 1) {
+        handle ??= await this.spawnWorker(agent, definition);
+        if (!handle) break;
+        const run = await this.createRun(agent);
+        if (!run) break;
+        this.sendRun(handle, run.id, agent.limits.timeoutMs);
+      }
     }
+    await this.writeHealth();
   }
 
-  /** 手动创建、尚未被任何子进程认领的运行：心跳还等于创建时间。 */
+  /** 手动创建、尚未被任何 worker 认领的运行：心跳还等于创建时间。 */
   private async orphanRun(agentId: string): Promise<RunView | null> {
     try {
       const runs = await this.client.request<RunView[]>(
@@ -180,93 +289,198 @@ class Supervisor {
     }
   }
 
-  private async launch(agent: EmbeddedAgentView, existing?: RunView): Promise<void> {
-    let run: RunView;
-    let token: string;
+  private async createRun(agent: EmbeddedAgentView): Promise<RunView | null> {
+    try {
+      return await this.client.request<RunView>(`embedded/agents/${encodeURIComponent(agent.id)}/run`, {
+        body: {},
+        operationId: `run:${agent.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      });
+    } catch (error) {
+      process.stderr.write(`启动 ${agent.name} 失败：${error instanceof Error ? error.message : String(error)}\n`);
+      return null;
+    }
+  }
+
+  private async spawnWorker(
+    agent: EmbeddedAgentView,
+    definition: EmbeddedAgentDefinition,
+  ): Promise<WorkerHandle | null> {
     try {
       await this.client.request(`embedded/agents/${encodeURIComponent(agent.id)}/ensure`, {
         body: {},
         operationId: `ensure:${agent.id}:${Date.now()}`,
       });
-      token = deriveEmbeddedToken(this.settings.secret, agent.id);
-      run =
-        existing ??
-        (await this.client.request<RunView>(`embedded/agents/${encodeURIComponent(agent.id)}/run`, {
-          body: {},
-          operationId: `run:${agent.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-        }));
     } catch (error) {
-      process.stderr.write(`启动 ${agent.name} 失败：${error instanceof Error ? error.message : String(error)}\n`);
-      return;
+      process.stderr.write(`准备 ${agent.name} 的令牌失败：${error instanceof Error ? error.message : String(error)}\n`);
+      return null;
     }
 
-    const workdir = join(runRoot(), agent.id, run.id);
-    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', this.sessionPath], {
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', this.workerPath], {
       cwd: process.cwd(),
       env: childEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    this.children.set(agent.id, { child, startedAt: Date.now() });
-    process.stderr.write(`▶ ${agent.name}（run ${run.id}）\n`);
-
-    child.stdin?.end(
-      JSON.stringify({
-        baseUrl: this.settings.baseUrl,
-        token,
-        runId: run.id,
-        agentId: agent.id,
-        definition: agent,
-        workdir,
-      }),
-    );
-
-    this.forward(agent.id, run.id, child);
-    const safety = setTimeout(
-      () => {
-        if (this.children.has(agent.id)) {
-          process.stderr.write(`运行 ${run.id} 超时未退出，终止子进程\n`);
-          child.kill('SIGKILL');
-        }
-      },
-      agent.limits.timeoutMs + 60_000,
-    );
-    safety.unref?.();
-
-    child.on('exit', (code, signal) => {
-      clearTimeout(safety);
-      this.children.delete(agent.id);
-      process.stderr.write(`■ ${agent.name}（run ${run.id}）退出：${signal ?? code}\n`);
-      void this.finishIfRunning(run.id, code, signal);
-    });
-  }
-
-  private forward(agentId: string, runId: string, child: ChildProcess): void {
-    const write = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
-      const text = chunk.toString('utf8').trim();
-      if (!text) return;
-      void this.client
-        .request(`embedded/runs/${encodeURIComponent(runId)}/log`, {
-          body: { level: stream === 'stderr' ? 'warn' : 'debug', text: `[${stream}] ${text}`.slice(0, 7_900) },
-          operationId: `run-fwd:${runId}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`,
-        })
-        .catch(() => undefined);
+    const handle: WorkerHandle = {
+      agentId: agent.id,
+      name: agent.name,
+      child,
+      hash: definitionHash(definition),
+      sessions: new Set(),
+      pending: new Set(),
+      timers: new Map(),
+      ready: false,
+      stopping: false,
+      lastActiveAt: Date.now(),
     };
-    child.stdout?.on('data', (chunk: Buffer) => write('stdout', chunk));
-    child.stderr?.on('data', (chunk: Buffer) => write('stderr', chunk));
+    this.workers.set(agent.id, handle);
+    this.attach(handle);
+    process.stderr.write(`▶ ${agent.name} 的 worker 已启动（并发 ${agent.concurrency}）\n`);
+
+    this.write(handle, {
+      type: 'config',
+      baseUrl: this.settings.baseUrl,
+      token: deriveEmbeddedToken(this.settings.secret, agent.id),
+      agentId: agent.id,
+      definition,
+      idleMs: this.settings.idleMs,
+    });
+    return handle;
   }
 
-  /** 子进程没有自己收尾（被杀死、崩溃）时补一条结论。 */
-  private async finishIfRunning(runId: string, code: number | null, signal: string | null): Promise<void> {
+  private attach(handle: WorkerHandle): void {
+    const stdout = createInterface({ input: handle.child.stdout! });
+    stdout.on('line', line => this.onEvent(handle, line));
+    const stderr = createInterface({ input: handle.child.stderr! });
+    stderr.on('line', line => {
+      if (line.trim()) process.stderr.write(`[${handle.name}] ${line}\n`);
+    });
+    handle.child.on('error', error => {
+      process.stderr.write(`[${handle.name}] worker 错误：${error.message}\n`);
+    });
+    handle.child.on('exit', (code, signal) => this.onExit(handle, code, signal));
+  }
+
+  private onEvent(handle: WorkerHandle, line: string): void {
+    let event: WorkerEvent;
+    try {
+      event = JSON.parse(line) as WorkerEvent;
+    } catch {
+      process.stderr.write(`[${handle.name}] ${line}\n`);
+      return;
+    }
+    handle.lastActiveAt = Date.now();
+    switch (event.type) {
+      case 'ready':
+        handle.ready = true;
+        return;
+      case 'session-start':
+        if (!event.runId) return;
+        handle.pending.delete(event.runId);
+        handle.sessions.add(event.runId);
+        process.stderr.write(`▶ ${handle.name}（run ${event.runId}）\n`);
+        return;
+      case 'session-end': {
+        if (!event.runId) return;
+        handle.pending.delete(event.runId);
+        handle.sessions.delete(event.runId);
+        const timer = handle.timers.get(event.runId);
+        if (timer) clearTimeout(timer);
+        handle.timers.delete(event.runId);
+        process.stderr.write(`■ ${handle.name}（run ${event.runId}）${event.status ?? '结束'}\n`);
+        return;
+      }
+      case 'rejected':
+        if (!event.runId) return;
+        handle.pending.delete(event.runId);
+        void this.finishIfRunning(event.runId, 'failed', event.reason ?? 'worker 拒绝接活');
+        return;
+      case 'idle-exit':
+        process.stderr.write(`· ${handle.name} 的 worker 空闲退出\n`);
+        return;
+      default:
+        process.stderr.write(`[${handle.name}] ${line}\n`);
+    }
+  }
+
+  private sendRun(handle: WorkerHandle, runId: string, timeoutMs: number): void {
+    handle.pending.add(runId);
+    handle.lastActiveAt = Date.now();
+    const timer = setTimeout(() => {
+      process.stderr.write(`运行 ${runId} 超时未结束，终止 ${handle.name} 的 worker\n`);
+      void this.finishIfRunning(runId, 'outcome_unknown', '运行超时，worker 被终止');
+      handle.child.kill('SIGKILL');
+    }, timeoutMs + 60_000);
+    timer.unref?.();
+    handle.timers.set(runId, timer);
+    this.write(handle, { type: 'run', runId });
+  }
+
+  private onExit(handle: WorkerHandle, code: number | null, signal: string | null): void {
+    if (this.workers.get(handle.agentId) === handle) this.workers.delete(handle.agentId);
+    for (const timer of handle.timers.values()) clearTimeout(timer);
+    handle.timers.clear();
+    const started = [...handle.sessions];
+    const queued = [...handle.pending];
+    handle.sessions.clear();
+    handle.pending.clear();
+    process.stderr.write(`■ ${handle.name} 的 worker 退出：${signal ?? code}\n`);
+    for (const runId of started) {
+      void this.finishIfRunning(runId, 'outcome_unknown', `agent worker 退出（${signal ?? code}），运行结果未知`);
+    }
+    for (const runId of queued) {
+      void this.finishIfRunning(runId, 'failed', `agent worker 退出（${signal ?? code}），该运行没有启动`);
+    }
+  }
+
+  private write(handle: WorkerHandle, message: Record<string, unknown>): void {
+    const stdin = handle.child.stdin;
+    if (!stdin || stdin.destroyed || handle.child.exitCode !== null) {
+      process.stderr.write(`[${handle.name}] worker 已退出，无法下发 ${String(message.type)}\n`);
+      return;
+    }
+    stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  private inFlight(handle: WorkerHandle): number {
+    return handle.sessions.size + handle.pending.size;
+  }
+
+  private totalInFlight(): number {
+    let total = 0;
+    for (const handle of this.workers.values()) total += this.inFlight(handle);
+    return total;
+  }
+
+  private overCapacity(): boolean {
+    return this.totalInFlight() >= this.settings.concurrency;
+  }
+
+  private isTracked(agentId: string, runId: string): boolean {
+    const handle = this.workers.get(agentId);
+    return Boolean(handle && (handle.sessions.has(runId) || handle.pending.has(runId)));
+  }
+
+  private stopWorker(handle: WorkerHandle, reason: string): void {
+    handle.stopping = true;
+    process.stderr.write(`· 停止 ${handle.name} 的 worker：${reason}\n`);
+    this.write(handle, { type: 'drain' });
+  }
+
+  /** worker 没有自己收尾（被杀死、崩溃）时补一条结论。 */
+  private async finishIfRunning(
+    runId: string,
+    status: 'failed' | 'outcome_unknown',
+    note: string,
+  ): Promise<void> {
     try {
       const run = await this.client.request<RunView>(`embedded/runs/${encodeURIComponent(runId)}`);
       if (run.status !== 'running') return;
-      const uncertain = signal === 'SIGKILL' || code === null || code === 2;
       await this.client.request(`embedded/runs/${encodeURIComponent(runId)}/finish`, {
         body: {
-          status: uncertain ? 'outcome_unknown' : 'failed',
-          exitCode: code ?? 1,
-          outcomeUnknown: uncertain,
-          error: `子进程退出（${signal ?? code}），没有自行收尾`,
+          status,
+          exitCode: 1,
+          outcomeUnknown: status === 'outcome_unknown',
+          error: note,
         },
         operationId: `run-supervisor-finish:${runId}`,
       });
@@ -275,14 +489,29 @@ class Supervisor {
     }
   }
 
+  /** `--once`：等所有下发的 Session 结束，再让 worker 退出。 */
+  async drain(): Promise<void> {
+    while (this.totalInFlight() > 0) await sleep(100);
+    const handles = [...this.workers.values()];
+    for (const handle of handles) this.write(handle, { type: 'drain' });
+    const deadline = Date.now() + 10_000;
+    while (this.workers.size > 0 && Date.now() < deadline) await sleep(100);
+    for (const handle of this.workers.values()) handle.child.kill('SIGKILL');
+  }
+
   async shutdown(): Promise<void> {
-    for (const { child } of this.children.values()) child.kill('SIGTERM');
-    await new Promise(resolve => setTimeout(resolve, 500));
-    for (const { child } of this.children.values()) child.kill('SIGKILL');
+    for (const handle of this.workers.values()) {
+      handle.stopping = true;
+      this.write(handle, { type: 'shutdown', graceMs: this.settings.graceMs });
+    }
+    const deadline = Date.now() + this.settings.graceMs + 5_000;
+    while (this.workers.size > 0 && Date.now() < deadline) await sleep(100);
+    for (const handle of this.workers.values()) handle.child.kill('SIGKILL');
+    await sleep(200);
   }
 
   get active(): number {
-    return this.children.size;
+    return this.totalInFlight();
   }
 }
 
@@ -290,16 +519,21 @@ async function main(): Promise<void> {
   const settings = options();
   const supervisor = new Supervisor(settings);
   process.stderr.write(
-    `supervisor 启动：${settings.baseUrl}，tick ${settings.tickMs}ms，并发 ${settings.concurrency}${settings.once ? '，单轮模式' : ''}\n`,
+    `supervisor 启动：${settings.baseUrl}，tick ${settings.tickMs}ms，全局并发 ${settings.concurrency}${settings.once ? '，单轮模式' : ''}\n`,
   );
   await supervisor.recover();
   await supervisor.importAgents();
   await supervisor.heartbeat();
+  if (process.env.COLLAB_KEEP_RUN !== '1') {
+    const removed = await pruneSessionDirs(settings.orphanTtlMs).catch(() => 0);
+    if (removed > 0) process.stderr.write(`回收了 ${removed} 个残留的 Session 目录\n`);
+  }
 
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    process.stderr.write('supervisor 收到退出信号，停止接活并等待未完成的运行\n');
     await supervisor.shutdown();
     process.exit(0);
   };
@@ -308,7 +542,7 @@ async function main(): Promise<void> {
 
   if (settings.once) {
     await supervisor.tick();
-    while (supervisor.active > 0) await new Promise(resolve => setTimeout(resolve, 200));
+    await supervisor.drain();
     return;
   }
 
@@ -318,8 +552,8 @@ async function main(): Promise<void> {
     } catch (error) {
       process.stderr.write(`tick 失败：${error instanceof Error ? error.message : String(error)}\n`);
     }
-    await new Promise(resolve => setTimeout(resolve, settings.tickMs));
+    await sleep(settings.tickMs);
   }
 }
 
-await main();
+void main();

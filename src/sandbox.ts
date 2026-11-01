@@ -271,6 +271,32 @@ export async function removeRunDir(dir: string, options: { keep?: boolean } = {}
   await fs.rm(target, { recursive: true, force: true });
 }
 
+/**
+ * 启动时回收崩溃残留的 Session 目录。
+ *
+ * 只删超过 ttl 的目录：同一 runRoot 可能有另一个 supervisor 正在跑，
+ * 刚创建、还没结束的目录不能动。agent 级工作根保留。
+ */
+export async function pruneSessionDirs(ttlMs = 24 * 60 * 60 * 1_000): Promise<number> {
+  const root = runRoot();
+  const agents = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  let removed = 0;
+  for (const agent of agents) {
+    if (!agent.isDirectory() || agent.isSymbolicLink()) continue;
+    const sessions = join(root, agent.name, 'sessions');
+    const entries = await fs.readdir(sessions, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const dir = join(sessions, entry.name);
+      const stat = await fs.stat(dir).catch(() => null);
+      if (!stat || Date.now() - stat.mtimeMs < ttlMs) continue;
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 export async function touchHeartbeatFile(dir: string): Promise<void> {
   await fs.writeFile(join(dir, '.heartbeat'), new Date().toISOString(), { mode: 0o600 }).catch(() => {});
 }

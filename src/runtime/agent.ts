@@ -36,6 +36,7 @@ export class AgentRuntime {
   private brainInstance: Brain | null;
   private specsCache: ToolSpec[] | null = null;
   private running = 0;
+  private presence = 0;
   private readonly waiters: Array<() => void> = [];
 
   private constructor(options: AgentRuntimeOptions, root: string) {
@@ -85,6 +86,24 @@ export class AgentRuntime {
 
   get activeSessions(): number {
     return this.running;
+  }
+
+  /**
+   * 在线状态是 agent 级的：同一 agent 的多个 Session 里，只有最后一个结束时
+   * 才把平台状态置为 offline，避免一个 Session 收尾把其它仍在跑的状态覆盖掉。
+   */
+  sessionBegin(): void {
+    this.presence += 1;
+  }
+
+  async sessionEnd(): Promise<void> {
+    this.presence = Math.max(0, this.presence - 1);
+    if (this.presence > 0) return;
+    try {
+      await this.client.heartbeat({ state: 'offline', note: '内置智能体一轮结束' });
+    } catch {
+      // 展示性状态，失败可忽略。
+    }
   }
 
   createSession(request: SessionRequest): AgentSession {

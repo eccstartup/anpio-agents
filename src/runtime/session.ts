@@ -35,6 +35,8 @@ export class AgentSession {
   private workdir: string | null = null;
   private mailSessionId: string | null = null;
   private toolExecuted = false;
+  private settled = false;
+  private readonly pulled: MailEnvelope[] = [];
 
   constructor(runtime: AgentRuntime, request: SessionRequest) {
     this.runtime = runtime;
@@ -75,11 +77,12 @@ export class AgentSession {
 
     const runDir = await createRunDir(this.runtime.agentId, runId);
     this.workdir = runDir;
+    this.runtime.sessionBegin();
     await writeAgentsFile(runDir, definition);
     this.log('info', `运行开始：${definition.name}（${definition.provider.id}/${definition.provider.model}），目录 ${runDir}`);
     this.log('debug', `子进程环境只有 ${Object.keys(scrubbedEnv(runDir)).join(', ')}`);
 
-    const pulled: MailEnvelope[] = [];
+    const pulled = this.pulled;
     let finished: { summary: string; outcome: string } | null = null;
 
     const heartbeat = async () => {
@@ -103,15 +106,17 @@ export class AgentSession {
       const session = await this.client.createMailSession(
         { label: `run:${runId}`, kind: 'embedded', ttlSeconds: 3_600 },
         `mail-session:${runId}`,
+        this.deadline.signal,
       );
       this.mailSessionId = session.id;
       result.mailSessionId = session.id;
       await heartbeat();
 
-      const page = await this.client.pullMail(session.id, {
-        limit: Math.min(this.maxMessages, 20),
-        leaseSeconds: 300,
-      });
+      const page = await this.client.pullMail(
+        session.id,
+        { limit: Math.min(this.maxMessages, 20), leaseSeconds: 300 },
+        this.deadline.signal,
+      );
       pulled.push(...page.items);
 
       if (pulled.length === 0) {
@@ -124,9 +129,10 @@ export class AgentSession {
       const parts: string[] = [];
       for (const envelope of pulled) {
         try {
-          const message = await this.client.mailMessage(envelope.id);
+          const message = await this.client.mailMessage(envelope.id, this.deadline.signal);
           parts.push(envelopeText(envelope, message.content));
         } catch (err) {
+          if (this.deadline.signal.aborted) throw err;
           this.log('warn', `消息 ${envelope.id} 正文读取失败：${err instanceof Error ? err.message : String(err)}`);
           parts.push(`【消息 ${envelope.id}】${envelope.kind}\n摘要：${envelope.summary}\n（正文不可访问）`);
         }
@@ -155,7 +161,10 @@ export class AgentSession {
 
       while (result.turns < definition.limits.maxTurns) {
         if (this.deadline.signal.aborted) {
-          if (!this.interrupted) {
+          if (this.interrupted) {
+            result.status = 'failed';
+            result.error = this.interrupted;
+          } else {
             result.status = 'timeout';
             result.error = `超过时限 ${definition.limits.timeoutMs}ms`;
           }
@@ -229,23 +238,20 @@ export class AgentSession {
             this.log('warn', `消息 ${envelope.id} 确认失败：${err instanceof Error ? err.message : String(err)}`);
           }
         }
-      } else if (!this.interrupted) {
+        this.settled = true;
+      } else {
+        // succeeded 只能来自 finish；没有 finish 的运行不能留在成功状态。
+        if (result.status === 'succeeded') {
+          result.status = 'failed';
+          result.error = '本轮没有调用 finish';
+        }
         const reason =
           result.status === 'outcome_unknown'
             ? '运行结果未知，等待人工核对'
             : '模型没有调用 finish，这一轮不算处理完成';
         this.log('warn', `${reason}；${pulled.length} 条消息退回队列（带退避）`);
-        for (const envelope of pulled) {
-          try {
-            await this.client.nackMail(envelope.id, {
-              deliveryId: envelope.deliveryId,
-              retryAfterSeconds: result.status === 'outcome_unknown' ? 3600 : 300,
-              reason,
-            });
-          } catch (err) {
-            this.log('warn', `消息 ${envelope.id} 退回失败：${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
+        await this.releaseMessages(pulled, result.status === 'outcome_unknown' ? 3600 : 300, reason);
+        this.settled = true;
       }
     } catch (err) {
       if (this.interrupted) {
@@ -262,6 +268,20 @@ export class AgentSession {
     } finally {
       if (this.timer) clearTimeout(this.timer);
       result.toolExecuted = this.toolExecuted;
+      // 没有走到 ack / nack 的运行（崩溃、超时、被 worker 中断）在这里退回消息，
+      // 否则只能等租约到期。已经执行过工具的按结果未知处理，退避更久。
+      if (!this.settled && this.pulled.length > 0) {
+        const interrupted = this.interrupted !== null;
+        const reason = interrupted
+          ? `运行时中断：${this.interrupted}`
+          : result.status === 'outcome_unknown'
+            ? '运行结果未知，等待人工核对'
+            : '运行未完成，消息退回队列';
+        const retryAfterSeconds = interrupted || result.status === 'outcome_unknown'
+          ? (this.toolExecuted ? 3600 : 300)
+          : 300;
+        await this.releaseMessages(this.pulled, retryAfterSeconds, reason);
+      }
       if (this.mailSessionId) {
         try {
           await this.client.closeMailSession(this.mailSessionId);
@@ -269,11 +289,7 @@ export class AgentSession {
           // 会话关闭失败不影响结论；过期后会被清理。
         }
       }
-      try {
-        await this.client.heartbeat({ state: 'offline', note: '内置智能体一轮结束' });
-      } catch {
-        // 展示性状态，失败可忽略。
-      }
+      await this.runtime.sessionEnd();
       await this.finishRun(result);
       if (process.env.COLLAB_KEEP_RUN === '1') {
         this.log('info', `保留运行目录：${runDir}`);
@@ -284,6 +300,20 @@ export class AgentSession {
     }
 
     return result;
+  }
+
+  private async releaseMessages(envelopes: MailEnvelope[], retryAfterSeconds: number, reason: string): Promise<void> {
+    for (const envelope of envelopes) {
+      try {
+        await this.client.nackMail(envelope.id, {
+          deliveryId: envelope.deliveryId,
+          retryAfterSeconds,
+          reason,
+        });
+      } catch (err) {
+        this.log('warn', `消息 ${envelope.id} 退回失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   private async finishRun(result: SessionResult): Promise<void> {
