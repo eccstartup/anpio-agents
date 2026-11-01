@@ -6,16 +6,21 @@
  * 对话历史、独立目录、时限与预算。两者之间只传普通数据，方便测试桩替换。
  */
 
-import type { CollabClient, MailEnvelope } from '../client.ts';
+import type { MailEnvelope } from '../client.ts';
+import type { ChatMessage } from '../brains/types.ts';
 import type { EmbeddedAgentDefinition } from '../definition.ts';
 
 export type SessionOutcome = 'succeeded' | 'failed' | 'timeout' | 'outcome_unknown';
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 /** 一次运行需要的东西；definition 缺省时用 AgentRuntime 的快照。 */
 export type SessionRequest = {
   runId: string;
   definition?: EmbeddedAgentDefinition;
   maxMessages?: number;
+  /** 多轮会话的历史消息；平台路径不传，行为不变。 */
+  history?: ChatMessage[];
   /**
    * 进程隔离模式下让子进程把已拉取的消息报给父进程：子进程被强杀时，
    * 父进程据此退回消息，语义与同进程中断一致。
@@ -41,12 +46,4 @@ export type SessionTask = {
   readonly runId: string;
   run(): Promise<SessionResult>;
   abort(reason: string): void;
-};
-
-/** AgentRuntime 暴露给 Session 的能力，测试可以注入替身。 */
-export type RuntimeContext = {
-  agentId: string;
-  definition: EmbeddedAgentDefinition;
-  client: CollabClient;
-  root: string;
 };

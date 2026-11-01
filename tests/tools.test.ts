@@ -142,7 +142,7 @@ test('工具：待办、拒绝、评论、开放池与任务文件与外部智�
   globalThis.fetch = stubFetch(seen);
   try {
     const tools = createTools({
-      client: new CollabClient('http://platform.test', 'agent-token'),
+      backend: new CollabClient('http://platform.test', 'agent-token'),
       runDir,
       runId: 'run1',
       definition: definition(),
@@ -178,7 +178,7 @@ test('工具：待办、拒绝、评论、开放池与任务文件与外部智�
 
     // 未启用的工具不会打到平台。
     const limited = createTools({
-      client: new CollabClient('http://platform.test', 'agent-token'),
+      backend: new CollabClient('http://platform.test', 'agent-token'),
       runDir,
       runId: 'run2',
       definition: definition(['task_get']),

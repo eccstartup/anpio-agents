@@ -10,14 +10,20 @@
  * 自己 ack/nack 与 finish，和同进程运行时是同一套生命周期。
  */
 
-import { AgentRuntime } from './runtime/agent.ts';
+import { AgentRuntime, collabRuntime } from './runtime/agent.ts';
 import type { SessionOutcome, SessionRequest } from './runtime/types.ts';
 import type { MailEnvelope } from './client.ts';
 import type { EmbeddedAgentDefinition } from './definition.ts';
 
+type TransportConfig =
+  | { type: 'collab'; baseUrl: string; token: string }
+  | { type: 'local'; root?: string };
+
 type RunConfig = {
-  baseUrl: string;
-  token: string;
+  /** 新入口用 transport 描述连接方式；旧的 baseUrl/token 扁平配置继续可用。 */
+  transport?: TransportConfig;
+  baseUrl?: string;
+  token?: string;
   runId: string;
   agentId: string;
   definition: EmbeddedAgentDefinition;
@@ -33,12 +39,15 @@ async function readConfig(): Promise<RunConfig> {
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (!raw) throw new Error('没有收到运行配置（stdin 为空），应由 supervisor 启动本进程');
   const parsed = JSON.parse(raw) as Partial<RunConfig>;
-  for (const key of ['baseUrl', 'token', 'runId', 'agentId'] as const) {
+  for (const key of ['runId', 'agentId'] as const) {
     if (typeof parsed[key] !== 'string' || !parsed[key]) throw new Error(`运行配置缺少 ${key}`);
   }
   const definition = parsed.definition as EmbeddedAgentDefinition | undefined;
   if (!definition || typeof definition !== 'object' || !definition.provider) {
     throw new Error('运行配置缺少 definition');
+  }
+  if (!parsed.transport && (typeof parsed.baseUrl !== 'string' || typeof parsed.token !== 'string')) {
+    throw new Error('运行配置缺少 transport（或 baseUrl/token）');
   }
   return parsed as RunConfig;
 }
@@ -56,12 +65,20 @@ function writeLine(event: Record<string, unknown>): Promise<void> {
 
 async function main(): Promise<number> {
   const config = await readConfig();
-  const runtime = await AgentRuntime.create({
-    baseUrl: config.baseUrl,
-    token: config.token,
-    agentId: config.agentId,
-    definition: config.definition,
-  });
+  const transport: TransportConfig =
+    config.transport ??
+    ({ type: 'collab', baseUrl: config.baseUrl!, token: config.token! } satisfies TransportConfig);
+  let runtime: AgentRuntime;
+  if (transport.type === 'collab') {
+    runtime = await collabRuntime({
+      baseUrl: transport.baseUrl,
+      token: transport.token,
+      agentId: config.agentId,
+      definition: config.definition,
+    });
+  } else {
+    throw new Error('本地传输层的 process 隔离尚未启用');
+  }
   const request: SessionRequest = {
     runId: config.runId,
     definition: config.definition,

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import type { CollabClient } from '../src/client.ts';
 import type { EmbeddedAgentDefinition } from '../src/definition.ts';
 import { AgentRuntime } from '../src/runtime/agent.ts';
+import { collabTransport } from '../src/runtime/transport.ts';
 
 function definition(concurrency = 1): EmbeddedAgentDefinition {
   const now = new Date().toISOString();
@@ -164,22 +165,17 @@ async function withRuntime<T>(
   fn: (runtime: AgentRuntime, fake: Fake, root: string) => Promise<T>,
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'anpio-runtime-'));
-  const previous = process.env.COLLAB_RUN_ROOT;
-  process.env.COLLAB_RUN_ROOT = root;
   let runtime: AgentRuntime | null = null;
   const fake = fakeClient(() => runtime?.activeSessions ?? 0);
   try {
     runtime = await AgentRuntime.create({
-      baseUrl: 'http://127.0.0.1:1',
-      token: 'test-token',
       agentId: 'agent1',
       definition: definition(concurrency),
-      client: fake.client,
+      transport: collabTransport(fake.client, { baseUrl: 'http://127.0.0.1:1', token: 'test-token' }),
+      rootBase: root,
     });
     await fn(runtime, fake, root);
   } finally {
-    if (previous === undefined) delete process.env.COLLAB_RUN_ROOT;
-    else process.env.COLLAB_RUN_ROOT = previous;
     rmSync(root, { recursive: true, force: true });
   }
 }

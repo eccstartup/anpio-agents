@@ -13,7 +13,7 @@
 
 import { createInterface } from 'node:readline';
 import type { EmbeddedAgentDefinition } from './definition.ts';
-import { AgentRuntime } from './runtime/agent.ts';
+import { AgentRuntime, collabRuntime } from './runtime/agent.ts';
 import type { SessionOutcome, SessionTask } from './runtime/types.ts';
 
 type WorkerConfig = {
@@ -180,7 +180,7 @@ async function main(): Promise<void> {
   }
   if (!config.definition || typeof config.definition !== 'object') throw new Error('worker 配置缺少 definition');
 
-  const runtime = await AgentRuntime.create({
+  const runtime = await collabRuntime({
     baseUrl: config.baseUrl,
     token: config.token,
     agentId: config.agentId,

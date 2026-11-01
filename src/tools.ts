@@ -6,9 +6,10 @@
  * 是致命的——这时本轮必须停下并以 outcome_unknown 收尾，不能假装成功。
  */
 
-import { CollabError, type CollabClient } from './client.ts';
+import { CollabError } from './client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from './definition.ts';
 import type { ToolCall, ToolSpec } from './brains/types.ts';
+import type { ToolBackend } from './runtime/transport.ts';
 import {
   listFilesInside,
   readBytesInside,
@@ -31,12 +32,14 @@ export type ToolExecution = {
 export type ToolLog = (level: 'debug' | 'info' | 'warn' | 'error', text: string) => void;
 
 export type ToolOptions = {
-  client: CollabClient;
+  /** 任务/文件/知识工具的后端；独立运行没有它时只暴露本地原语。 */
+  backend?: ToolBackend;
   runDir: string;
   runId: string;
   definition: EmbeddedAgentDefinition;
+  /** 实际生效的工具清单；缺省用 definition.tools。 */
+  tools?: readonly EmbeddedTool[];
   log: ToolLog;
-  heartbeat?: () => void | Promise<void>;
 };
 
 type Schema = Record<string, unknown>;
@@ -226,9 +229,15 @@ function safeName(name: string): string {
 }
 
 export function createTools(options: ToolOptions) {
-  const { client, runDir, runId, definition, log } = options;
-  const enabled = new Set<string>(definition.tools);
-  const specs = definition.tools.map(tool => TOOL_SPECS[tool]).filter((spec): spec is ToolSpec => Boolean(spec));
+  const { backend, runDir, runId, definition, log } = options;
+  const enabledTools = options.tools ?? definition.tools;
+  const enabled = new Set<string>(enabledTools);
+  const specs = enabledTools.map(tool => TOOL_SPECS[tool]).filter((spec): spec is ToolSpec => Boolean(spec));
+
+  const platform = (): ToolBackend => {
+    if (!backend) throw new Error('当前运行环境没有平台工具后端');
+    return backend;
+  };
 
   const operation = (call: ToolCall, suffix = '') => `run:${runId}:${call.id}${suffix ? `:${suffix}` : ''}`;
 
@@ -241,7 +250,7 @@ export function createTools(options: ToolOptions) {
       switch (call.name) {
         case 'task_get': {
           const taskId = textOf(input, 'taskId', 128);
-          const task = await client.task(taskId);
+          const task = await platform().task(taskId);
           return {
             content: render({
               task: task.task,
@@ -252,15 +261,17 @@ export function createTools(options: ToolOptions) {
           };
         }
         case 'subtask_inbox':
-          return { content: render(await client.inbox()) };
+          return { content: render(await platform().inbox()) };
         case 'task_accept':
           return {
-            content: render(await client.accept(textOf(input, 'subtaskId', 128), operation(call), optionalVersion(input))),
+            content: render(
+              await platform().accept(textOf(input, 'subtaskId', 128), operation(call), optionalVersion(input)),
+            ),
           };
         case 'task_progress':
           return {
             content: render(
-              await client.progress(
+              await platform().progress(
                 textOf(input, 'subtaskId', 128),
                 textOf(input, 'text', 4_000),
                 operation(call),
@@ -275,7 +286,7 @@ export function createTools(options: ToolOptions) {
           }
           return {
             content: render(
-              await client.submit(
+              await platform().submit(
                 textOf(input, 'subtaskId', 128),
                 result as Record<string, unknown>,
                 operation(call),
@@ -287,7 +298,7 @@ export function createTools(options: ToolOptions) {
         case 'subtask_reject':
           return {
             content: render(
-              await client.reject(
+              await platform().reject(
                 textOf(input, 'subtaskId', 128),
                 textOf(input, 'reason', 4_000),
                 operation(call),
@@ -298,24 +309,24 @@ export function createTools(options: ToolOptions) {
         case 'task_comment':
           return {
             content: render(
-              await client.comment(textOf(input, 'taskId', 128), textOf(input, 'body', 20_000), operation(call)),
+              await platform().comment(textOf(input, 'taskId', 128), textOf(input, 'body', 20_000), operation(call)),
             ),
           };
         case 'task_comments': {
           const limit = input.limit === undefined ? 200 : Number(input.limit);
           if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('limit 必须是 1..500 的整数');
-          return { content: render(await client.comments(textOf(input, 'taskId', 128), limit)) };
+          return { content: render(await platform().comments(textOf(input, 'taskId', 128), limit)) };
         }
         case 'offer_list':
-          return { content: render(await client.openOffers()) };
+          return { content: render(await platform().openOffers()) };
         case 'offer_claim':
           return {
-            content: render(await client.claimOffer(textOf(input, 'offerId', 128), operation(call))),
+            content: render(await platform().claimOffer(textOf(input, 'offerId', 128), operation(call))),
           };
         case 'task_files':
-          return { content: render(await client.taskFiles(textOf(input, 'taskId', 128))) };
+          return { content: render(await platform().taskFiles(textOf(input, 'taskId', 128))) };
         case 'file_download': {
-          const downloaded = await client.downloadTaskFile(
+          const downloaded = await platform().downloadTaskFile(
             textOf(input, 'taskId', 128),
             textOf(input, 'fileId', 128),
           );
@@ -334,7 +345,7 @@ export function createTools(options: ToolOptions) {
           const subtaskId = input.subtaskId === undefined ? undefined : textOf(input, 'subtaskId', 128);
           return {
             content: render(
-              await client.uploadTaskFile(
+              await platform().uploadTaskFile(
                 textOf(input, 'taskId', 128),
                 {
                   name,
@@ -351,7 +362,7 @@ export function createTools(options: ToolOptions) {
         case 'knowledge_search': {
           const limit = input.limit === undefined ? 10 : Number(input.limit);
           if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('limit 必须是 1..50 的整数');
-          const found = await client.searchKnowledge(textOf(input, 'query', 500), limit);
+          const found = await platform().searchKnowledge(textOf(input, 'query', 500), limit);
           return { content: render(found) };
         }
         case 'shell': {

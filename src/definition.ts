@@ -43,6 +43,18 @@ export const EMBEDDED_TOOLS = [
 
 export type EmbeddedTool = (typeof EMBEDDED_TOOLS)[number];
 
+/** 执行引擎自己提供的工具，不依赖任何控制面。 */
+export const LOCAL_TOOLS = ['shell', 'read_file', 'write_file', 'list_files', 'finish'] as const;
+
+export function isLocalTool(tool: EmbeddedTool): boolean {
+  return (LOCAL_TOOLS as readonly string[]).includes(tool);
+}
+
+export const COMPLETION_POLICIES = ['finish', 'text'] as const;
+
+/** finish：必须调用 finish 才算完成；text：模型给出纯文本回答即视为完成。 */
+export type CompletionPolicy = (typeof COMPLETION_POLICIES)[number];
+
 export const SESSION_ISOLATIONS = ['inline', 'process'] as const;
 
 /** inline：Session 在 worker 进程内并发；process：每个 Session 一个子进程。 */
@@ -101,6 +113,8 @@ export type EmbeddedAgentDefinition = {
   concurrency: number;
   /** 缺省 inline，保持既有行为；process 让每个 Session 跑在独立子进程里。 */
   sessionIsolation?: SessionIsolation;
+  /** 缺省 finish，保持平台行为；text 适合聊天式独立运行。 */
+  completion?: CompletionPolicy;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;

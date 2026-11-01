@@ -38,15 +38,15 @@ export function safeSegment(value: string): string {
  * agent 级工作根：`<runRoot>/<agentId>/`，跨 Session 存在。
  * 每个 Session 在 `sessions/<runId>` 下工作，互不共享目录。
  */
-export async function ensureAgentRoot(agentId: string): Promise<string> {
-  const dir = join(runRoot(), safeSegment(agentId));
+export async function ensureAgentRoot(agentId: string, base?: string): Promise<string> {
+  const dir = join(base ? resolve(base) : runRoot(), safeSegment(agentId));
   await fs.mkdir(join(dir, 'sessions'), { recursive: true, mode: 0o700 });
   return dir;
 }
 
 /** 每个 Session 一个 0700 目录，结束即清理。 */
-export async function createRunDir(agentId: string, runId: string): Promise<string> {
-  const dir = join(runRoot(), safeSegment(agentId), 'sessions', safeSegment(runId));
+export async function createRunDir(agentId: string, runId: string, base?: string): Promise<string> {
+  const dir = join(base ? resolve(base) : runRoot(), safeSegment(agentId), 'sessions', safeSegment(runId));
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.mkdir(join(dir, 'tmp'), { recursive: true, mode: 0o700 });
   return dir;
@@ -262,9 +262,10 @@ export async function listFilesInside(root: string, relative = '.') {
 }
 
 /** 清理过期 run 目录；keepRun=1 时保留排查。 */
-export async function removeRunDir(dir: string, options: { keep?: boolean } = {}): Promise<void> {
+export async function removeRunDir(dir: string, options: { keep?: boolean; root?: string } = {}): Promise<void> {
   if (options.keep) return;
-  const root = await realpath(runRoot()).catch(() => runRoot());
+  const base = options.root ? resolve(options.root) : runRoot();
+  const root = await realpath(base).catch(() => base);
   // 两侧都取真实路径：macOS 的 /var 指向 /private/var，只解析一侧会误判越界。
   const target = await realpath(resolve(dir)).catch(() => resolve(dir));
   if (target === root || !target.startsWith(root + sep)) throw new Error('拒绝删除运行目录之外的内容');
@@ -277,8 +278,8 @@ export async function removeRunDir(dir: string, options: { keep?: boolean } = {}
  * 只删超过 ttl 的目录：同一 runRoot 可能有另一个 supervisor 正在跑，
  * 刚创建、还没结束的目录不能动。agent 级工作根保留。
  */
-export async function pruneSessionDirs(ttlMs = 24 * 60 * 60 * 1_000): Promise<number> {
-  const root = runRoot();
+export async function pruneSessionDirs(ttlMs = 24 * 60 * 60 * 1_000, base?: string): Promise<number> {
+  const root = base ? resolve(base) : runRoot();
   const agents = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
   let removed = 0;
   for (const agent of agents) {

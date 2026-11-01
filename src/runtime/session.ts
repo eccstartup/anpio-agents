@@ -7,14 +7,15 @@
  */
 
 import type { ChatMessage, ToolSpec } from '../brains/types.ts';
-import type { CollabClient, MailEnvelope } from '../client.ts';
-import type { EmbeddedAgentDefinition } from '../definition.ts';
+import type { MailEnvelope } from '../client.ts';
+import type { CompletionPolicy, EmbeddedAgentDefinition } from '../definition.ts';
 import { createRunDir, removeRunDir, scrubbedEnv } from '../sandbox.ts';
 import { createTools } from '../tools.ts';
 import type { AgentRuntime } from './agent.ts';
 import { createRunLog, type RunLog, type RunLogger } from './log.ts';
 import { envelopeText, substitute, systemPromptFor, writeAgentsFile } from './prompt.ts';
-import type { SessionOutcome, SessionRequest, SessionResult } from './types.ts';
+import type { AgentTransport } from './transport.ts';
+import type { SessionRequest, SessionResult } from './types.ts';
 
 const MAX_MESSAGES = 5;
 
@@ -24,7 +25,9 @@ export class AgentSession {
   readonly maxMessages: number;
 
   private readonly runtime: AgentRuntime;
-  private readonly client: CollabClient;
+  private readonly transport: AgentTransport;
+  private readonly completion: CompletionPolicy;
+  private readonly history: ChatMessage[];
   private readonly logger: RunLogger;
   private readonly log: RunLog;
   private readonly onMailPulled: SessionRequest['onMailPulled'];
@@ -44,9 +47,11 @@ export class AgentSession {
     this.runId = request.runId;
     this.definition = request.definition ?? runtime.definition;
     this.maxMessages = request.maxMessages ?? MAX_MESSAGES;
-    this.client = runtime.client;
+    this.transport = runtime.transport;
+    this.completion = this.definition.completion === 'text' ? 'text' : 'finish';
+    this.history = request.history ?? [];
     this.onMailPulled = request.onMailPulled;
-    this.logger = createRunLog(this.client, this.runId);
+    this.logger = createRunLog(this.transport.runs, this.runId);
     this.log = this.logger.log;
   }
 
@@ -77,10 +82,10 @@ export class AgentSession {
       mailSessionId: null,
     };
 
-    const runDir = await createRunDir(this.runtime.agentId, runId);
+    const runDir = await createRunDir(this.runtime.agentId, runId, this.runtime.rootBase);
     this.workdir = runDir;
     this.runtime.sessionBegin();
-    await writeAgentsFile(runDir, definition);
+    await writeAgentsFile(runDir, definition, this.runtime.tools, this.transport.environment);
     this.log('info', `运行开始：${definition.name}（${definition.provider.id}/${definition.provider.model}），目录 ${runDir}`);
     this.log('debug', `子进程环境只有 ${Object.keys(scrubbedEnv(runDir)).join(', ')}`);
 
@@ -89,12 +94,12 @@ export class AgentSession {
 
     const heartbeat = async () => {
       try {
-        await this.client.request(`embedded/runs/${encodeURIComponent(runId)}/heartbeat`, {
-          body: this.mailSessionId ? { sessionId: this.mailSessionId } : {},
-          operationId: `run-hb:${runId}:${Date.now()}`,
-        });
+        await this.transport.runs.heartbeat(
+          runId,
+          this.mailSessionId ? { sessionId: this.mailSessionId } : {},
+        );
       } catch {
-        // 心跳失败不打断本轮；supervisor 会按停滞时间回收。
+        // 心跳失败不打断本轮；控制面会按停滞时间回收。
       }
     };
 
@@ -105,16 +110,15 @@ export class AgentSession {
     this.timer.unref?.();
 
     try {
-      const session = await this.client.createMailSession(
+      const session = await this.transport.mailbox.open(
         { label: `run:${runId}`, kind: 'embedded', ttlSeconds: 3_600 },
-        `mail-session:${runId}`,
         this.deadline.signal,
       );
       this.mailSessionId = session.id;
       result.mailSessionId = session.id;
       await heartbeat();
 
-      const page = await this.client.pullMail(
+      const page = await this.transport.mailbox.pull(
         session.id,
         { limit: Math.min(this.maxMessages, 20), leaseSeconds: 300 },
         this.deadline.signal,
@@ -132,7 +136,7 @@ export class AgentSession {
       const parts: string[] = [];
       for (const envelope of pulled) {
         try {
-          const message = await this.client.mailMessage(envelope.id, this.deadline.signal);
+          const message = await this.transport.mailbox.message(envelope.id, this.deadline.signal);
           parts.push(envelopeText(envelope, message.content));
         } catch (err) {
           if (this.deadline.signal.aborted) throw err;
@@ -143,15 +147,18 @@ export class AgentSession {
 
       const brain = this.runtime.brainForSession();
       const tools = createTools({
-        client: this.client,
+        backend: this.transport.tools,
         runDir,
         runId,
         definition,
+        tools: this.runtime.tools,
         log: this.log,
-        heartbeat,
       });
-      const messages: ChatMessage[] = [{ role: 'user', content: parts.join('\n\n---\n\n') }];
-      const system = systemPromptFor(definition);
+      const messages: ChatMessage[] = [
+        ...this.history,
+        { role: 'user', content: parts.join('\n\n---\n\n') },
+      ];
+      const system = systemPromptFor(definition, this.transport.environment);
       const vars = {
         taskId: pulled.find(item => item.ref.taskId)?.ref.taskId ?? '',
         refId: pulled[0]?.ref.id ?? '',
@@ -188,10 +195,15 @@ export class AgentSession {
 
         if (!response.toolCalls || response.toolCalls.length === 0) {
           if (response.text) messages.push({ role: 'assistant', content: response.text });
-          // 没有 finish 就没有可交付的结论；这条消息会退回队列，运行不能算成功。
-          result.status = 'failed';
-          result.error = '模型没有再调用工具，本轮到此为止';
-          this.log('warn', result.error);
+          if (this.completion === 'text' && response.text?.trim()) {
+            finished = { summary: response.text.trim(), outcome: 'done' };
+            this.log('info', '模型给出文本回答，按 text 完成策略收尾');
+          } else {
+            // finish 策略下没有 finish 就没有可交付的结论；这条消息会退回队列。
+            result.status = 'failed';
+            result.error = '模型没有再调用工具，本轮到此为止';
+            this.log('warn', result.error);
+          }
           break;
         }
 
@@ -236,7 +248,7 @@ export class AgentSession {
         // 只有明确收尾的消息才算处理完；blocked 也算处理过（已经留言说明）。
         for (const envelope of pulled) {
           try {
-            await this.client.ackMail(envelope.id, envelope.deliveryId);
+            await this.transport.mailbox.ack(envelope.id, envelope.deliveryId);
           } catch (err) {
             this.log('warn', `消息 ${envelope.id} 确认失败：${err instanceof Error ? err.message : String(err)}`);
           }
@@ -287,7 +299,7 @@ export class AgentSession {
       }
       if (this.mailSessionId) {
         try {
-          await this.client.closeMailSession(this.mailSessionId);
+          await this.transport.mailbox.close(this.mailSessionId);
         } catch {
           // 会话关闭失败不影响结论；过期后会被清理。
         }
@@ -297,7 +309,7 @@ export class AgentSession {
       if (process.env.COLLAB_KEEP_RUN === '1') {
         this.log('info', `保留运行目录：${runDir}`);
       } else {
-        await removeRunDir(runDir).catch(() => undefined);
+        await removeRunDir(runDir, { root: this.runtime.rootBase }).catch(() => undefined);
       }
       await this.logger.flush();
     }
@@ -308,7 +320,7 @@ export class AgentSession {
   private async releaseMessages(envelopes: MailEnvelope[], retryAfterSeconds: number, reason: string): Promise<void> {
     for (const envelope of envelopes) {
       try {
-        await this.client.nackMail(envelope.id, {
+        await this.transport.mailbox.nack(envelope.id, {
           deliveryId: envelope.deliveryId,
           retryAfterSeconds,
           reason,
@@ -320,22 +332,10 @@ export class AgentSession {
   }
 
   private async finishRun(result: SessionResult): Promise<void> {
-    const status: SessionOutcome = result.status;
     try {
-      await this.client.request(`embedded/runs/${encodeURIComponent(this.runId)}/finish`, {
-        body: {
-          status,
-          exitCode: status === 'succeeded' ? 0 : 1,
-          turns: result.turns,
-          promptTokens: result.promptTokens,
-          completionTokens: result.completionTokens,
-          outcomeUnknown: status === 'outcome_unknown',
-          ...(result.error ? { error: result.error } : {}),
-        },
-        operationId: `run-finish:${this.runId}`,
-      });
+      await this.transport.runs.finish(this.runId, result);
     } catch {
-      // 收尾失败由 supervisor 的恢复扫描兜底。
+      // 收尾失败由控制面的恢复扫描兜底。
     }
   }
 }

@@ -89,9 +89,16 @@ export class ProcessSession implements SessionTask {
   }
 
   private execute(): Promise<Exit> {
+    const transport = this.runtime.transport.spawnConfig?.(this.runId) ?? null;
+    if (!transport) {
+      return Promise.resolve({
+        code: null,
+        signal: null,
+        error: new Error('当前传输层不支持 process 隔离'),
+      });
+    }
     const config = {
-      baseUrl: this.runtime.baseUrl,
-      token: this.runtime.token,
+      transport,
       runId: this.runId,
       agentId: this.runtime.agentId,
       definition: this.definition,
@@ -202,9 +209,7 @@ export class ProcessSession implements SessionTask {
 
   private async runStillRunning(): Promise<boolean> {
     try {
-      const run = await this.runtime.client.request<{ status?: string }>(
-        `embedded/runs/${encodeURIComponent(this.runId)}`,
-      );
+      const run = await this.runtime.transport.runs.status(this.runId);
       return run.status === 'running';
     } catch {
       return true;
@@ -221,36 +226,36 @@ export class ProcessSession implements SessionTask {
         : '运行未完成，消息退回队列';
     for (const envelope of this.pulled) {
       try {
-        await this.runtime.client.nackMail(envelope.id, {
+        await this.runtime.transport.mailbox.nack(envelope.id, {
           deliveryId: envelope.deliveryId,
           retryAfterSeconds,
           reason,
         });
       } catch {
-        // 租约到期后平台会自行退回。
+        // 租约到期后控制面会自行退回。
       }
     }
   }
 
   private async finishRun(status: SessionOutcome, error: string): Promise<void> {
-    await this.runtime.client.request(`embedded/runs/${encodeURIComponent(this.runId)}/finish`, {
-      body: {
-        status,
-        exitCode: status === 'succeeded' ? 0 : 1,
-        turns: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        outcomeUnknown: status === 'outcome_unknown',
-        error,
-      },
-      operationId: `run-process-finish:${this.runId}`,
+    await this.runtime.transport.runs.finish(this.runId, {
+      status,
+      turns: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      error,
+      summary: null,
+      toolExecuted: false,
+      mailSessionId: null,
     });
   }
 
   private async cleanup(): Promise<void> {
     if (process.env.COLLAB_KEEP_RUN === '1') return;
     try {
-      await removeRunDir(join(this.runtime.root, 'sessions', safeSegment(this.runId)));
+      await removeRunDir(join(this.runtime.root, 'sessions', safeSegment(this.runId)), {
+        root: this.runtime.rootBase,
+      });
     } catch {
       // 目录可能已经由子进程清掉，或者从未创建。
     }

@@ -9,33 +9,41 @@
 import { brainFor } from '../brains/index.ts';
 import type { Brain, ToolSpec } from '../brains/types.ts';
 import { CollabClient } from '../client.ts';
-import type { EmbeddedAgentDefinition, SessionIsolation } from '../definition.ts';
+import type { EmbeddedAgentDefinition, EmbeddedTool, SessionIsolation } from '../definition.ts';
 import { ensureAgentRoot } from '../sandbox.ts';
 import { createTools } from '../tools.ts';
 import { ProcessSession } from './process-session.ts';
 import { AgentSession } from './session.ts';
+import { collabTransport, type AgentTransport } from './transport.ts';
 import type { SessionRequest, SessionResult, SessionTask } from './types.ts';
 
 export type AgentRuntimeOptions = {
+  agentId: string;
+  definition: EmbeddedAgentDefinition;
+  transport: AgentTransport;
+  /** 工作根；缺省用运行环境的 COLLAB_RUN_ROOT。 */
+  rootBase?: string;
+  /** 测试替身：跳过模型适配器与密钥解析。 */
+  brain?: Brain;
+};
+
+export type CollabRuntimeOptions = {
   baseUrl: string;
   token: string;
   agentId: string;
   definition: EmbeddedAgentDefinition;
-  /** 测试替身：跳过真实 HTTP 客户端。 */
-  client?: CollabClient;
-  /** 测试替身：跳过模型适配器与密钥解析。 */
+  rootBase?: string;
   brain?: Brain;
 };
 
 export class AgentRuntime {
   readonly agentId: string;
   readonly definition: EmbeddedAgentDefinition;
-  readonly client: CollabClient;
+  readonly transport: AgentTransport;
   /** `<runRoot>/<agentId>/`，跨 Session 的目录根。 */
   readonly root: string;
-  /** 进程隔离模式下要原样交给 Session 子进程的连接信息。 */
-  readonly baseUrl: string;
-  readonly token: string;
+  /** 调用方指定的工作根；缺省时由运行环境决定。 */
+  readonly rootBase: string | undefined;
 
   private brainInstance: Brain | null;
   private specsCache: ToolSpec[] | null = null;
@@ -46,15 +54,14 @@ export class AgentRuntime {
   private constructor(options: AgentRuntimeOptions, root: string) {
     this.agentId = options.agentId;
     this.definition = options.definition;
-    this.client = options.client ?? new CollabClient(options.baseUrl, options.token, { timeoutMs: 20_000 });
+    this.transport = options.transport;
     this.root = root;
-    this.baseUrl = options.baseUrl;
-    this.token = options.token;
+    this.rootBase = options.rootBase;
     this.brainInstance = options.brain ?? null;
   }
 
   static async create(options: AgentRuntimeOptions): Promise<AgentRuntime> {
-    const root = await ensureAgentRoot(options.agentId);
+    const root = await ensureAgentRoot(options.agentId, options.rootBase);
     return new AgentRuntime(options, root);
   }
 
@@ -72,13 +79,33 @@ export class AgentRuntime {
     return this.definition.provider.protocol === 'script' ? brainFor(this.definition.provider) : this.brain;
   }
 
+  /** 定义里声明、且当前传输层确实能提供的工具。 */
+  get tools(): EmbeddedTool[] {
+    return this.definition.tools.filter(tool => this.transport.supportsTool(tool));
+  }
+
+  /** 定义里声明、但当前传输层无法提供的工具。 */
+  get missingTools(): EmbeddedTool[] {
+    return this.definition.tools.filter(tool => !this.transport.supportsTool(tool));
+  }
+
+  /** 启动时校验；missingTools 非空且不允许降级时直接报错。 */
+  validateTools(allowMissing = false): void {
+    if (!allowMissing && this.missingTools.length > 0) {
+      throw new Error(
+        `当前运行环境不支持这些工具：${this.missingTools.join(', ')}（需要对应的 ToolBackend）`,
+      );
+    }
+  }
+
   get toolSpecs(): ToolSpec[] {
     if (!this.specsCache) {
       this.specsCache = createTools({
-        client: this.client,
+        backend: this.transport.tools,
         runDir: this.root,
         runId: 'spec',
         definition: this.definition,
+        tools: this.tools,
         log: () => undefined,
       }).specs;
     }
@@ -106,7 +133,7 @@ export class AgentRuntime {
     this.presence = Math.max(0, this.presence - 1);
     if (this.presence > 0) return;
     try {
-      await this.client.heartbeat({ state: 'offline', note: '内置智能体一轮结束' });
+      await this.transport.presence.heartbeat({ state: 'offline', note: '内置智能体一轮结束' });
     } catch {
       // 展示性状态，失败可忽略。
     }
@@ -159,4 +186,16 @@ export class AgentRuntime {
     const next = this.waiters.shift();
     if (next) next();
   }
+}
+
+/** anpio-collab 路径的工厂：保留原有连接方式，把客户端包成 AgentTransport。 */
+export async function collabRuntime(options: CollabRuntimeOptions): Promise<AgentRuntime> {
+  const client = new CollabClient(options.baseUrl, options.token, { timeoutMs: 20_000 });
+  return await AgentRuntime.create({
+    agentId: options.agentId,
+    definition: options.definition,
+    transport: collabTransport(client, { baseUrl: options.baseUrl, token: options.token }),
+    ...(options.rootBase === undefined ? {} : { rootBase: options.rootBase }),
+    ...(options.brain === undefined ? {} : { brain: options.brain }),
+  });
 }
