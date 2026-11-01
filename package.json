@@ -1,0 +1,20 @@
+{
+  "name": "anpio-agents",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ANPIO 内嵌智能体执行引擎：supervisor、一次性会话、模型适配器与沙箱",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "runtime": "node --disable-warning=ExperimentalWarning src/supervisor.ts",
+    "session": "node --disable-warning=ExperimentalWarning src/session.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "agents": [
+    {
+      "name": "演示脚本智能体",
+      "description": "不联网的确定性示例：收到消息后看一眼沙箱、写一份笔记，然后收尾。用来验证 supervisor、运行记录与日志。",
+      "capabilities": ["demo"],
+      "provider": {
+        "id": "script",
+        "protocol": "script",
+        "model": "script",
+        "script": [
+          { "tool": "shell", "input": { "command": "pwd && echo 收到协作消息，演示运行开始" } },
+          {
+            "tool": "write_file",
+            "input": { "path": "notes.txt", "content": "这是演示智能体在沙箱里写下的笔记。\n" }
+          },
+          { "tool": "finish", "input": { "summary": "演示运行完成：已查看环境并写入 notes.txt", "outcome": "done" } }
+        ]
+      },
+      "tools": ["shell", "read_file", "write_file", "list_files", "finish"],
+      "sandbox": { "shell": true, "shellTimeoutMs": 30000, "maxOutputBytes": 65536 },
+      "limits": { "maxTurns": 8, "timeoutMs": 60000, "maxTokens": 1024 },
+      "enabled": true,
+      "concurrency": 1
+    },
+    {
+      "name": "Anthropic 助手",
+      "description": "需要 ANTHROPIC_API_KEY。默认停用，填好密钥后再启用。",
+      "capabilities": ["inventory"],
+      "provider": {
+        "id": "anthropic",
+        "protocol": "anthropic-messages",
+        "model": "claude-sonnet-4-5",
+        "apiKeyEnv": "ANTHROPIC_API_KEY"
+      },
+      "systemPrompt": "先读任务详情与验收条件；拿不准就在任务里留言，不要编造材料里没有的结论。",
+      "tools": ["task_get", "subtask_inbox", "task_accept", "task_progress", "task_submit", "subtask_reject", "task_comment", "task_comments", "offer_list", "offer_claim", "task_files", "file_download", "file_upload", "knowledge_search", "read_file", "list_files", "finish"],
+      "limits": { "maxTurns": 12, "timeoutMs": 180000, "maxTokens": 8192 },
+      "enabled": false,
+      "concurrency": 1
+    },
+    {
+      "name": "OpenAI 助手",
+      "description": "需要 OPENAI_API_KEY。默认停用，填好密钥后再启用。",
+      "capabilities": ["supplier"],
+      "provider": {
+        "id": "openai",
+        "protocol": "openai-chat",
+        "model": "gpt-5",
+        "apiKeyEnv": "OPENAI_API_KEY"
+      },
+      "systemPrompt": "交付时附上来源与观测时间；不能完成就说明卡在哪里。",
+      "tools": ["task_get", "subtask_inbox", "task_accept", "task_progress", "task_submit", "subtask_reject", "task_comment", "task_comments", "offer_list", "offer_claim", "task_files", "file_download", "file_upload", "knowledge_search", "read_file", "list_files", "finish"],
+      "limits": { "maxTurns": 12, "timeoutMs": 180000, "maxTokens": 8192 },
+      "enabled": false,
+      "concurrency": 1
+    }
+  ]
+}
