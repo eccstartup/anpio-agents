@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { EmbeddedAgentDefinition } from '../definition.ts';
-import { removeRunDir, safeSegment } from '../sandbox.ts';
+import { keepRunDir, removeRunDir, safeSegment } from '../sandbox.ts';
 import type { AgentRuntime } from './agent.ts';
 import type { SessionOutcome, SessionRequest, SessionResult, SessionTask } from './types.ts';
 
@@ -251,7 +251,7 @@ export class ProcessSession implements SessionTask {
   }
 
   private async cleanup(): Promise<void> {
-    if (process.env.COLLAB_KEEP_RUN === '1') return;
+    if (keepRunDir()) return;
     try {
       await removeRunDir(join(this.runtime.root, 'sessions', safeSegment(this.runId)), {
         root: this.runtime.rootBase,

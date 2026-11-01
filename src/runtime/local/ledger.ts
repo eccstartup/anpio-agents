@@ -39,10 +39,17 @@ export type CreateRunInput = {
 export class LocalRunLedger implements RunLedgerPort {
   private readonly dir: string;
   private readonly now: () => number;
+  /** 独立入口把日志同时写到 stderr；平台路径不传。 */
+  private readonly mirror: ((level: LogLevel, text: string) => void) | undefined;
 
-  constructor(options: { dir: string; now?: () => number }) {
+  constructor(options: {
+    dir: string;
+    now?: () => number;
+    mirror?: (level: LogLevel, text: string) => void;
+  }) {
     this.dir = options.dir;
     this.now = options.now ?? Date.now;
+    this.mirror = options.mirror;
   }
 
   async create(runId: string, input: CreateRunInput = {}): Promise<LocalRunRecord> {
@@ -80,6 +87,7 @@ export class LocalRunLedger implements RunLedgerPort {
   }
 
   async log(runId: string, level: LogLevel, text: string): Promise<void> {
+    this.mirror?.(level, text);
     await appendJsonLine(this.logPath(runId), {
       at: new Date(this.now()).toISOString(),
       level,

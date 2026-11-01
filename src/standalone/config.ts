@@ -1,0 +1,332 @@
+/**
+ * 独立运行的定义文件加载器。
+ *
+ * 平台路径的定义由 anpio-collab 规范化；从文件跑时没有人替我们补默认值，
+ * 所以这里做同一件事：校验协议与工具、补齐 id / 时间戳 / 限额，并在启动前
+ * 确认密钥环境变量存在，避免跑到一半才发现缺配置。
+ */
+
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
+import {
+  COMPLETION_POLICIES,
+  EMBEDDED_TOOLS,
+  PROTOCOLS,
+  SESSION_ISOLATIONS,
+  type AgentScope,
+  type CompletionPolicy,
+  type EmbeddedAgentDefinition,
+  type EmbeddedProviderConfig,
+  type EmbeddedTool,
+  type Protocol,
+  type ScriptStep,
+  type SessionIsolation,
+} from '../definition.ts';
+
+type Raw = Record<string, unknown>;
+
+export class StandaloneConfigError extends Error {
+  override name = 'StandaloneConfigError';
+}
+
+export type LoadDefinitionOptions = {
+  /** 命令行覆盖定义里的完成策略。 */
+  completion?: CompletionPolicy;
+  now?: Date;
+};
+
+const DEFAULT_BASE_URLS: Partial<Record<Protocol, string>> = {
+  'openai-chat': 'https://api.openai.com/v1',
+  'openai-responses': 'https://api.openai.com/v1',
+  'anthropic-messages': 'https://api.anthropic.com',
+  'gemini-generate': 'https://generativelanguage.googleapis.com/v1beta',
+  script: '',
+};
+
+const DEFAULT_KEY_ENV: Partial<Record<Protocol, string | null>> = {
+  'openai-chat': 'OPENAI_API_KEY',
+  'openai-responses': 'OPENAI_API_KEY',
+  'anthropic-messages': 'ANTHROPIC_API_KEY',
+  'gemini-generate': 'GEMINI_API_KEY',
+  'workers-ai': 'CLOUDFLARE_API_TOKEN',
+  script: null,
+};
+
+/** 能独立跑多轮对话的协议；其余协议要么未实现，要么不适合对话。 */
+const STANDALONE_PROTOCOLS = new Set<Protocol>([
+  'script',
+  'openai-chat',
+  'openai-responses',
+  'anthropic-messages',
+  'gemini-generate',
+  'workers-ai',
+]);
+
+const DEFAULT_TOOLS: EmbeddedTool[] = ['read_file', 'write_file', 'list_files', 'finish'];
+const DEFAULT_LIMITS = { maxTurns: 12, timeoutMs: 180_000, maxTokens: 8_192 };
+const DEFAULT_SANDBOX = { shellTimeoutMs: 30_000, maxOutputBytes: 65_536 };
+const MAX_ID_LENGTH = 128;
+
+const SCOPES: readonly AgentScope[] = [
+  'tasks:read',
+  'tasks:submit',
+  'offers:claim',
+  'knowledge:read',
+  'comments:write',
+  'presence:write',
+  'mailbox:read',
+  'mailbox:write',
+];
+
+function isRecord(value: unknown): value is Raw {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function record(value: unknown, path: string): Raw {
+  if (!isRecord(value)) throw new StandaloneConfigError(`${path} 必须是对象`);
+  return value;
+}
+
+function fail(path: string, message: string): never {
+  throw new StandaloneConfigError(`${path} ${message}`);
+}
+
+function optionalString(value: unknown, path: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') fail(path, '必须是字符串');
+  return value;
+}
+
+function positiveInt(value: unknown, path: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    fail(path, '必须是正整数');
+  }
+  return value;
+}
+
+function stringList(value: unknown, path: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail(path, '必须是字符串数组');
+  return value.map((item, index) => {
+    if (typeof item !== 'string') fail(`${path}[${index}]`, '必须是字符串');
+    return item;
+  });
+}
+
+function normalizeId(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[^A-Za-z0-9._:-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, MAX_ID_LENGTH);
+  return cleaned || 'agent';
+}
+
+function requireString(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.trim() === '') fail(path, '必须是非空字符串');
+  return value.trim();
+}
+
+function parseScriptSteps(value: unknown): ScriptStep[] {
+  if (!Array.isArray(value)) fail('provider.script', '必须是数组');
+  return value.map((item, index) => {
+    const path = `provider.script[${index}]`;
+    const step = record(item, path);
+    const text = optionalString(step.text, `${path}.text`);
+    const tool = optionalString(step.tool, `${path}.tool`);
+    if (text === undefined && tool === undefined) fail(path, '需要 text 或 tool 至少一项');
+    if (tool !== undefined && !(EMBEDDED_TOOLS as readonly string[]).includes(tool)) {
+      fail(`${path}.tool`, `不是已知工具：${tool}`);
+    }
+    if (step.input !== undefined && !isRecord(step.input)) fail(`${path}.input`, '必须是对象');
+    return {
+      ...(text === undefined ? {} : { text }),
+      ...(tool === undefined ? {} : { tool }),
+      ...(step.input === undefined ? {} : { input: step.input as Record<string, unknown> }),
+    };
+  });
+}
+
+function parseTools(value: unknown): EmbeddedTool[] {
+  if (value === undefined) return [...DEFAULT_TOOLS];
+  if (!Array.isArray(value)) fail('tools', '必须是工具名数组');
+  const seen = new Set<string>();
+  const tools: EmbeddedTool[] = [];
+  value.forEach((item, index) => {
+    if (typeof item !== 'string' || !(EMBEDDED_TOOLS as readonly string[]).includes(item)) {
+      fail(`tools[${index}]`, `不是已知工具：${String(item)}`);
+    }
+    if (seen.has(item)) return;
+    seen.add(item);
+    tools.push(item as EmbeddedTool);
+  });
+  return tools;
+}
+
+function parseProvider(raw: unknown, providerIdFallback: string): EmbeddedProviderConfig {
+  const provider = record(raw, 'provider');
+  const protocol = requireString(provider.protocol, 'provider.protocol') as Protocol;
+  if (!(PROTOCOLS as readonly string[]).includes(protocol)) {
+    fail('provider.protocol', `不是已知协议：${protocol}`);
+  }
+  if (!STANDALONE_PROTOCOLS.has(protocol)) {
+    fail('provider.protocol', `协议 ${protocol} 暂不支持独立多轮运行`);
+  }
+
+  const model =
+    protocol === 'script'
+      ? optionalString(provider.model, 'provider.model') ?? 'script'
+      : requireString(provider.model, 'provider.model');
+
+  const defaultBaseUrl = DEFAULT_BASE_URLS[protocol];
+  const baseUrl =
+    optionalString(provider.baseUrl, 'provider.baseUrl') ??
+    defaultBaseUrl ??
+    fail(
+      'provider.baseUrl',
+      protocol === 'workers-ai'
+        ? '必须提供（Workers AI 的地址包含账户 id，没有通用默认值）'
+        : '必须提供',
+    );
+  if (protocol !== 'script' && !baseUrl) fail('provider.baseUrl', '必须是非空字符串');
+
+  let apiKeyEnv: string | null;
+  if (provider.apiKeyEnv === null) {
+    apiKeyEnv = null;
+  } else {
+    const explicit = optionalString(provider.apiKeyEnv, 'provider.apiKeyEnv');
+    apiKeyEnv = explicit ?? DEFAULT_KEY_ENV[protocol] ?? null;
+  }
+
+  const script =
+    protocol === 'script'
+      ? parseScriptSteps(provider.script)
+      : provider.script === undefined
+        ? undefined
+        : parseScriptSteps(provider.script);
+
+  return {
+    id: optionalString(provider.id, 'provider.id') ?? providerIdFallback,
+    protocol,
+    baseUrl,
+    model,
+    apiKeyEnv,
+    ...(script === undefined ? {} : { script }),
+  };
+}
+
+function parseCompletion(value: unknown, override: CompletionPolicy | undefined): CompletionPolicy {
+  if (override) return override;
+  if (value === undefined) return 'finish';
+  if (typeof value !== 'string' || !(COMPLETION_POLICIES as readonly string[]).includes(value)) {
+    fail('completion', `只能是 ${COMPLETION_POLICIES.join(' / ')}`);
+  }
+  return value as CompletionPolicy;
+}
+
+function parseIsolation(value: unknown): SessionIsolation {
+  if (value === undefined) return 'inline';
+  if (typeof value !== 'string' || !(SESSION_ISOLATIONS as readonly string[]).includes(value)) {
+    fail('sessionIsolation', `只能是 ${SESSION_ISOLATIONS.join(' / ')}`);
+  }
+  return value as SessionIsolation;
+}
+
+export function normalizeDefinition(
+  raw: unknown,
+  fallbackId: string,
+  options: LoadDefinitionOptions = {},
+): EmbeddedAgentDefinition {
+  const root = record(raw, '定义');
+  const id =
+    root.id === undefined
+      ? normalizeId(fallbackId)
+      : requireString(root.id, 'id');
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(id)) {
+    fail('id', '只能包含字母、数字、. _ : -，长度 1–128');
+  }
+
+  const provider = parseProvider(root.provider, `standalone-${id}`);
+  const tools = parseTools(root.tools);
+
+  const limitsRaw = root.limits === undefined ? {} : record(root.limits, 'limits');
+  const limits = {
+    maxTurns: positiveInt(limitsRaw.maxTurns, 'limits.maxTurns', DEFAULT_LIMITS.maxTurns),
+    timeoutMs: positiveInt(limitsRaw.timeoutMs, 'limits.timeoutMs', DEFAULT_LIMITS.timeoutMs),
+    maxTokens: positiveInt(limitsRaw.maxTokens, 'limits.maxTokens', DEFAULT_LIMITS.maxTokens),
+  };
+
+  const sandboxRaw = root.sandbox === undefined ? {} : record(root.sandbox, 'sandbox');
+  if (sandboxRaw.shell !== undefined && typeof sandboxRaw.shell !== 'boolean') {
+    fail('sandbox.shell', '必须是布尔值');
+  }
+  const shell = sandboxRaw.shell === undefined ? tools.includes('shell') : sandboxRaw.shell;
+  if (!shell && tools.includes('shell')) {
+    fail('sandbox.shell', 'tools 含 shell 时必须开启（否则工具会在运行时报错）');
+  }
+  const sandbox = {
+    shell,
+    shellTimeoutMs: positiveInt(sandboxRaw.shellTimeoutMs, 'sandbox.shellTimeoutMs', DEFAULT_SANDBOX.shellTimeoutMs),
+    maxOutputBytes: positiveInt(sandboxRaw.maxOutputBytes, 'sandbox.maxOutputBytes', DEFAULT_SANDBOX.maxOutputBytes),
+  };
+
+  const scopes = stringList(root.scopes, 'scopes').map((scope, index) => {
+    if (!(SCOPES as readonly string[]).includes(scope)) fail(`scopes[${index}]`, `不是已知范围：${scope}`);
+    return scope as AgentScope;
+  });
+
+  if (root.enabled !== undefined && typeof root.enabled !== 'boolean') fail('enabled', '必须是布尔值');
+
+  const now = (options.now ?? new Date()).toISOString();
+  const completion = parseCompletion(root.completion, options.completion);
+  const definition: EmbeddedAgentDefinition = {
+    id,
+    name: optionalString(root.name, 'name') ?? id,
+    description: optionalString(root.description, 'description') ?? '',
+    capabilities: stringList(root.capabilities, 'capabilities'),
+    provider,
+    systemPrompt: optionalString(root.systemPrompt, 'systemPrompt') ?? '',
+    tools,
+    scopes,
+    limits,
+    sandbox,
+    enabled: root.enabled === undefined ? true : root.enabled,
+    concurrency: positiveInt(root.concurrency, 'concurrency', 1),
+    sessionIsolation: parseIsolation(root.sessionIsolation),
+    completion,
+    createdBy: null,
+    createdAt: optionalString(root.createdAt, 'createdAt') ?? now,
+    updatedAt: optionalString(root.updatedAt, 'updatedAt') ?? now,
+    lastRunAt: null,
+    lastError: null,
+  };
+
+  if (provider.apiKeyEnv && !process.env[provider.apiKeyEnv]) {
+    fail('provider.apiKeyEnv', `缺少环境变量 ${provider.apiKeyEnv}（密钥只从环境变量读取）`);
+  }
+
+  return definition;
+}
+
+export async function loadDefinition(
+  file: string,
+  options: LoadDefinitionOptions = {},
+): Promise<EmbeddedAgentDefinition> {
+  let text: string;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') throw new StandaloneConfigError(`定义文件不存在：${file}`);
+    throw new StandaloneConfigError(`读取定义文件失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new StandaloneConfigError(`定义文件不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const fallbackId = basename(file).replace(/\.json$/i, '');
+  return normalizeDefinition(raw, fallbackId, options);
+}

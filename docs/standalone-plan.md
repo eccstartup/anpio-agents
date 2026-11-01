@@ -1,6 +1,6 @@
 # 行动计划：把执行引擎从 anpio-collab 解耦，支持独立运行
 
-- 状态：待评审
+- 状态：实施中（P0 端口提取、P1 本地传输层、P2 独立入口已完成）
 - 日期：2026-11-01
 - 范围：`anpio-agents` 执行引擎
 - 前置：`docs/action-plan.md`（常驻 worker 承载多 Session）已完成并合入

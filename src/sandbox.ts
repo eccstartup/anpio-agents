@@ -28,6 +28,11 @@ export function runRoot(): string {
     : resolve(process.cwd(), 'collab-runs');
 }
 
+/** 平台与独立入口各自的保留开关；任一开启都不清理运行目录。 */
+export function keepRunDir(): boolean {
+  return process.env.AGENT_KEEP_RUN === '1' || process.env.COLLAB_KEEP_RUN === '1';
+}
+
 /** 目录名来自平台，这里再挡一层路径字符；agentId 与 runId 都由平台生成。 */
 export function safeSegment(value: string): string {
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(value)) throw new Error('运行目录名不合法');

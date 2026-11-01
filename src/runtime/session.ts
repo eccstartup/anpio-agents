@@ -9,7 +9,7 @@
 import type { ChatMessage, ToolSpec } from '../brains/types.ts';
 import type { MailEnvelope } from '../client.ts';
 import type { CompletionPolicy, EmbeddedAgentDefinition } from '../definition.ts';
-import { createRunDir, removeRunDir, scrubbedEnv } from '../sandbox.ts';
+import { createRunDir, keepRunDir, removeRunDir, scrubbedEnv } from '../sandbox.ts';
 import { createTools } from '../tools.ts';
 import type { AgentRuntime } from './agent.ts';
 import { createRunLog, type RunLog, type RunLogger } from './log.ts';
@@ -306,7 +306,7 @@ export class AgentSession {
       }
       await this.runtime.sessionEnd();
       await this.finishRun(result);
-      if (process.env.COLLAB_KEEP_RUN === '1') {
+      if (keepRunDir()) {
         this.log('info', `保留运行目录：${runDir}`);
       } else {
         await removeRunDir(runDir, { root: this.runtime.rootBase }).catch(() => undefined);

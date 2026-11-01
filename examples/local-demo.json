@@ -1,0 +1,19 @@
+{
+  "id": "local-demo",
+  "name": "本地演示",
+  "description": "不调用模型、不需要密钥的确定性示例：看一眼沙箱，写一份结果，然后收尾。",
+  "provider": {
+    "id": "script",
+    "protocol": "script",
+    "model": "script",
+    "script": [
+      { "tool": "shell", "input": { "command": "pwd && echo 独立运行开始" } },
+      { "tool": "write_file", "input": { "path": "result.txt", "content": "独立运行完成。\n" } },
+      { "tool": "finish", "input": { "summary": "已查看沙箱并写入 result.txt", "outcome": "done" } }
+    ]
+  },
+  "tools": ["shell", "read_file", "write_file", "list_files", "finish"],
+  "limits": { "maxTurns": 8, "timeoutMs": 60000, "maxTokens": 1024 },
+  "sandbox": { "shell": true, "shellTimeoutMs": 30000, "maxOutputBytes": 65536 },
+  "concurrency": 1
+}

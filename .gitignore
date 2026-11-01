@@ -1,4 +1,5 @@
 node_modules/
 collab-runs/
+agent-runs/
 .DS_Store
 *.log

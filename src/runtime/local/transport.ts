@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { isLocalTool, type EmbeddedTool } from '../../definition.ts';
 import { LOCAL_ENVIRONMENT } from '../prompt.ts';
 import type { AgentTransport, PresencePort, ToolBackend } from '../transport.ts';
+import type { LogLevel } from '../types.ts';
 import { LocalRunLedger } from './ledger.ts';
 import { LocalMailbox, type EnqueueInput } from './mailbox.ts';
 import { writeJsonAtomic } from './store.ts';
@@ -62,13 +63,20 @@ export type LocalTransportOptions = {
   mailbox?: LocalMailbox;
   ledger?: LocalRunLedger;
   presence?: LocalPresence;
+  /** 把运行日志同步写到终端（独立入口用）。 */
+  logMirror?: (level: LogLevel, text: string) => void;
 };
 
 export function localTransport(options: LocalTransportOptions = {}): LocalTransport {
   const root = resolve(options.root ?? defaultLocalRoot());
   const stateDir = join(root, '.local');
   const mailbox = options.mailbox ?? new LocalMailbox({ file: join(stateDir, 'mailbox.json') });
-  const runs = options.ledger ?? new LocalRunLedger({ dir: join(stateDir, 'runs') });
+  const runs =
+    options.ledger ??
+    new LocalRunLedger({
+      dir: join(stateDir, 'runs'),
+      ...(options.logMirror ? { mirror: options.logMirror } : {}),
+    });
   const presence = options.presence ?? new LocalPresence(join(stateDir, 'presence.json'));
   const tools = options.tools;
 
