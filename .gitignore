@@ -1,5 +1,6 @@
 node_modules/
 collab-runs/
 agent-runs/
+examples/anp/.anp-data/
 .DS_Store
 *.log

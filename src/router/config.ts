@@ -37,6 +37,15 @@ export type RouterConfig = {
   childScanIntervalMs: number;
   /** 定时调度 tick 间隔；0 表示不自动触发。 */
   scheduleTickIntervalMs: number;
+  /** 容器隔离：工具执行的 docker 与资源上限。 */
+  container: {
+    docker: string;
+    image: string;
+    allowMissing: boolean;
+    memory: string;
+    cpus: string;
+    pidsLimit: number;
+  };
 };
 
 type Raw = Record<string, unknown>;
@@ -50,6 +59,14 @@ const DEFAULTS = {
   sweepIntervalMs: 1_000,
   childScanIntervalMs: 60_000,
   scheduleTickIntervalMs: 1_000,
+  container: {
+    docker: 'docker',
+    image: 'anp-toolbox:latest',
+    allowMissing: false,
+    memory: '1g',
+    cpus: '1',
+    pidsLimit: 256,
+  },
 };
 
 function isRecord(value: unknown): value is Raw {
@@ -113,6 +130,27 @@ function parsePositiveInt(value: unknown, path: string, fallback: number | null)
   return value;
 }
 
+function parseBoolean(value: unknown, path: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') fail(path, '必须是布尔值');
+  return value;
+}
+
+function envBoolean(value: string, path: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  fail(path, `不是布尔值：${value}`);
+}
+
+function parsePidsLimit(value: unknown, path: string): number {
+  const number = typeof value === 'string' ? Number(value) : value;
+  if (typeof number !== 'number' || !Number.isInteger(number) || number < 16 || number > 100_000) {
+    fail(path, '必须是 16–100000 的整数');
+  }
+  return number;
+}
+
 export function parseRouterConfig(
   raw: unknown,
   options: { baseDir: string; env?: NodeJS.ProcessEnv },
@@ -160,6 +198,29 @@ export function parseRouterConfig(
     fail('routing.strategy', '只能是 deterministic / model');
   }
 
+  const containerRaw = root.container === undefined ? {} : record(root.container, 'container');
+  const container = {
+    docker: env.ANP_CONTAINER_DOCKER
+      ?? optionalString(containerRaw.docker, 'container.docker')
+      ?? DEFAULTS.container.docker,
+    image: env.ANP_CONTAINER_IMAGE
+      ?? optionalString(containerRaw.image, 'container.image')
+      ?? DEFAULTS.container.image,
+    allowMissing: env.ANP_ALLOW_MISSING_CONTAINER !== undefined
+      ? envBoolean(env.ANP_ALLOW_MISSING_CONTAINER, 'ANP_ALLOW_MISSING_CONTAINER')
+      : parseBoolean(containerRaw.allowMissing, 'container.allowMissing', DEFAULTS.container.allowMissing),
+    memory: env.ANP_CONTAINER_MEMORY
+      ?? optionalString(containerRaw.memory, 'container.memory')
+      ?? DEFAULTS.container.memory,
+    cpus: env.ANP_CONTAINER_CPUS
+      ?? optionalString(containerRaw.cpus, 'container.cpus')
+      ?? DEFAULTS.container.cpus,
+    pidsLimit: parsePidsLimit(
+      env.ANP_CONTAINER_PIDS_LIMIT ?? containerRaw.pidsLimit ?? DEFAULTS.container.pidsLimit,
+      'container.pidsLimit',
+    ),
+  };
+
   return {
     root: rootPath,
     didBaseUrl,
@@ -183,6 +244,7 @@ export function parseRouterConfig(
       'scheduleTickIntervalMs',
       DEFAULTS.scheduleTickIntervalMs,
     ),
+    container,
   };
 }
 

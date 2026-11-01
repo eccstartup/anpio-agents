@@ -14,6 +14,8 @@ import type { LogLevel } from './types.ts';
 export type BrainLoopTools = {
   specs: ToolSpec[];
   execute(call: ToolCall): Promise<ToolExecution>;
+  /** 本轮结束后释放工具侧资源（例如容器）。 */
+  dispose?(): Promise<void>;
 };
 
 export type BrainLoopOptions = {

@@ -128,6 +128,7 @@ export class AnpTurnSession implements SessionTask {
       await this.ledger.heartbeat(this.runId, this.mailSessionId ? { sessionId: this.mailSessionId } : {});
     };
 
+    let turnTools: BrainLoopTools | null = null;
     try {
       const mailSession = await this.mailbox.open(
         { label: `session:${this.sessionId}`, kind: 'embedded', ttlSeconds: 3_600 },
@@ -150,6 +151,7 @@ export class AnpTurnSession implements SessionTask {
       const context = buildThreadContext(this.store, this.threadId);
       const messages: ChatMessage[] = context.messages;
       const tools = this.toolsFor(workdir);
+      turnTools = tools;
       const system = [
         systemPromptFor(this.definition, ANP_ENVIRONMENT),
         [
@@ -241,6 +243,13 @@ export class AnpTurnSession implements SessionTask {
           await this.mailbox.close(this.mailSessionId);
         } catch {
           // 过期租约由 pull 前的 releaseExpiredLeases 兜底。
+        }
+      }
+      if (turnTools?.dispose) {
+        try {
+          await turnTools.dispose();
+        } catch {
+          // 容器清理失败不影响本轮结果；残留容器由 labels 与超时兜底。
         }
       }
       try {

@@ -184,6 +184,108 @@ curl -sS -N http://127.0.0.1:8788/runs/run-.../events
 - 启动时若设了 `COLLAB_AGENTS_FILE`，按名称 upsert 定义；
 - 启动时清理超过 `COLLAB_ORPHAN_TTL_MS` 的 Session 目录；`SIGTERM` / `SIGINT` 后停止接活、等待收尾，未完成的运行会把消息退回队列。
 
+## ANP 常驻 router（多 agent）
+
+`npm run router` 启动一个常驻进程，进程内托管多个 ANP agent。每个 agent 有自己的 DID、数据库、workspace 与长期 thread session；router 内嵌 ANP-09 消息服务、DID 文档、ADP 与发现索引，另外开放管理接口。
+
+```text
+router 进程
+├─ ANP 服务 127.0.0.1:8787   /anp-im/rpc、/.well-known/anp-message-service.json
+├─ DID 服务 127.0.0.1:8788   /agents/<id>/<fp>/did.json、.well-known/agent-descriptions
+│                            /admin/*、/health
+└─ AgentHost × N
+   ├─ agents/<id>/agent.db       mirror / inbox / outbox / sessions / turns / notes
+   ├─ agents/<id>/workspace/threads/<threadId>/
+   └─ AgentRuntime → 模型循环（每轮工具在 inline / container 中执行）
+```
+
+数据根（默认 `.anp`）下还有 `router.db`（控制面：注册表、sessions、schedules、父子关系）与 `anp/service.db`（投递权威）。三个库都用 WAL，重启后按 `message_id` 去重，已 ack 的消息不会重复处理。
+
+### 启动与示例
+
+[examples/anp/router.local.json](examples/anp/router.local.json) 配了两个脚本 agent：`planner` 收到消息后把任务派给 `worker`，`worker` 清点 workspace、写 `worker-result.md` 并回复。整个过程不发网络请求、不需要密钥。
+
+```bash
+npm run router -- --config examples/anp/router.local.json
+```
+
+另开一个终端（默认端口见配置）：
+
+```bash
+curl -s http://127.0.0.1:8788/health
+curl -s http://127.0.0.1:8788/.well-known/agent-descriptions
+npm run anp:send -- --from planner --to worker --thread t1 --text "把这份目录整理成清单"
+```
+
+`anp:send` 调 `POST /admin/messages`，可以带 `--type`、`--title`、`--skills`、`--reply-to`、`--admin-url`、`--token`；设了 `adminToken` 时令牌取 `ANP_ADMIN_TOKEN`。验收点：
+
+1. `worker` 在 `agents/worker/workspace/threads/t1/worker-result.md` 留下结果，并在同一 thread 回复 `planner`；
+2. 重启 router 后再发一条，thread 历史仍在，已 ack 的消息不会重跑；
+3. `GET /admin/agents/<id>` 能看到 session、最近 turn 与 `lastError`；
+4. 定义里开启 `anp.allowSchedules` 后，`schedule_create` 的 `at` / `interval` / `cron` 任务按点触发且只触发一次。
+
+配置字段：`root`、`agentsFile`、`didBaseUrl`、`publicUrl`、`listen`（DID/管理）、`anpListen`（ANP 服务）、`adminToken`、`defaultAgent`、`maxActiveTurns`、`routing.strategy`（当前为 `deterministic`）、`watchIntervalMs`、`sweepIntervalMs`、`childScanIntervalMs`、`scheduleTickIntervalMs`，以及下面的 `container`。对应环境变量以 `ANP_` 开头（如 `ANP_ROOT`、`ANP_ADMIN_TOKEN`、`ANP_CONTAINER_IMAGE`），相对路径按配置文件目录解析。
+
+### agent 定义与运行时策略
+
+`agents.json` 里的定义与独立运行共用同一套字段，另加 `anp` 段：
+
+```json
+{
+  "id": "worker",
+  "provider": { "protocol": "script", "script": [] },
+  "tools": ["shell", "read_file", "write_file", "list_files", "anp_reply", "finish_turn"],
+  "anp": {
+    "isolation": "inline",
+    "allowSchedules": true,
+    "allowSpawn": true,
+    "network": "egress",
+    "networkAllowlist": ["api.example.com"],
+    "maxSchedules": 20,
+    "maxChildren": 3,
+    "maxDepth": 2
+  }
+}
+```
+
+- 工具可用性 = 定义 `tools` ∩ router 提供的工具；router 不提供的平台工具在启动时直接报错。
+- 协作工具：`anp_send` / `anp_reply` / `anp_list_messages` / `anp_get_message`、`list_agents` / `agent_status`、`memory_get` / `memory_set`、`finish_turn`。
+- 定时任务：只有 `anp.allowSchedules=true` 的 agent 能用 `schedule_create` / `schedule_cancel` / `list_schedules`，只能操作自己的任务；`kind` 支持 `at`（ISO 时间）、`interval`（`60s` / `5m` / `2h` / `1d`）、`cron`（5 段）。最小间隔 60 秒，每 agent 默认最多 20 个；`catchUp` 为 `skip`（默认）/ `once` / `all`，`maxRuns` 限制总次数。触发时向指定 thread 投递 `anp.schedule.fire`，`schedule_fires(schedule_id, scheduled_at)` 唯一键保证重启与重复 tick 不重复触发。
+- 子 agent：父定义需 `anp.allowSpawn=true`；深度默认最多 2、每个父最多 3 个，工具只能从父的工具里收缩；子 agent 有独立 DID 与 `agents/<childId>/`，workspace 在父的 `workspace/subagents/` 下，TTL 到期后归档但保留 workspace。
+- 联网：`anp.network` 为 `none` / `egress` / `open`，默认 `egress` 且 allowlist 为空，即不能用 `http_fetch`。allowlist 支持 `*.example.com` 与 `host:port`；DNS 解析后拒绝回环、RFC1918 与 link-local 地址，请求超时 30 秒、响应 ≤1 MiB、最多 3 次重定向。
+
+### 隔离级别与容器
+
+| `anp.isolation` | 模型循环 / ANP 签名 / 数据库 | `shell`、`read_file`、`write_file`、`list_files` |
+| --- | --- | --- |
+| `inline` | router 进程 | router 进程，仅路径与环境清洗 |
+| `process` | router 进程 | 目前同样在 router 进程内（保留值，尚未拆子进程） |
+| `container` | router 进程 | 每轮一个 Docker 容器，经 `docker exec` 执行 |
+
+容器模式只隔离**工具执行**，不隔离模型推理：DID 私钥、模型密钥、平台令牌都在主机侧，容器里没有；`http_fetch` 仍在主机侧执行，便于 SSRF 校验与审计。容器以 `--network none`、`--read-only`、`no-new-privileges`、`cap-drop ALL`、pids / memory / cpus 上限启动，只挂载当前 thread 的 workspace，并且只接受一个每轮生成的 32 字节工具 token。工具调用结束（或本轮失败）后容器立即删除。
+
+```bash
+container/build.sh
+# 输出 anp-toolbox:latest；也可用 ANP_CONTAINER_IMAGE 指定别的 tag
+```
+
+```json
+{
+  "container": {
+    "docker": "docker",
+    "image": "anp-toolbox:latest",
+    "allowMissing": false,
+    "memory": "1g",
+    "cpus": "1",
+    "pidsLimit": 256
+  }
+}
+```
+
+- 定义写了 `isolation: "container"` 但 docker 不可用时，该 agent 不启动并记录 `lastError`；需要“没有 Docker 就退回进程内工具”时设 `container.allowMissing: true`（或 `ANP_ALLOW_MISSING_CONTAINER=1`）。
+- 容器运行时缺失是显式选择，不会静默降级：看不到 `container/build.sh` 提示就检查 `container.docker` 与镜像 tag。
+- 进程模式（`inline` / `process`）的 `shell` 仍可能访问网络；只有 `http_fetch` 受 allowlist 约束。需要真正断网时用容器模式。
+
 ## 一次运行
 
 ```text
@@ -264,7 +366,15 @@ npm run check
 - `tests/supervisor.test.ts`：跨进程跑一个 script 智能体，验证接活、提交、ack、收尾与目录回收；
 - `tests/tools.test.ts`：工具层与外部 Agent 的接口对齐（待办、拒绝、评论、开放池、文件）；
 - `tests/brains.test.ts`：各模型协议的请求形状与工具调用解析；
-- `tests/sandbox.test.ts`：路径边界、环境清洗、超时、截断与过期目录回收。
+- `tests/sandbox.test.ts`：路径边界、环境清洗、超时、截断与过期目录回收；
+- `tests/store.test.ts`：迁移幂等、WAL 并发、`BEGIN IMMEDIATE` 争用、lease 过期与 outbox 去重；
+- `tests/anp-identity.test.ts` / `tests/anp-service.test.ts` / `tests/anp-mailbox.test.ts`：DID 文档自验、ADP 与发现索引、签名投递与 nonce 重放、游标与租约；
+- `tests/thread-session.test.ts` / `tests/router.test.ts` / `tests/router-tools.test.ts`：同 thread 多轮与恢复、两个 agent 互发、按 DID/能力路由、子 agent 收缩、写工具幂等；
+- `tests/scheduler.test.ts`：at / interval / cron、catch-up、重复 tick 与重启不重复、取消；
+- `tests/container.test.ts`：容器内执行器的 token 校验、路径与符号链接逃逸、docker 缺失时的跳过/回退；`ANP_TEST_CONTAINER=1` 时额外验收无密钥环境变量、workspace 可写与默认无网络；
+- `tests/e2e.test.ts`：直接加载 `examples/anp/agents.json`，离线跑通两个脚本 agent 的派活与回复，以及两 agent + 定时任务的完整链路。
+
+沙箱里如果出现 `listen EPERM`，是测试进程没有本机端口绑定权限；`tests/service*.test.ts`、`tests/supervisor*.test.ts`、`tests/worker*.test.ts` 会因此失败，其余 router / ANP / scheduler / container 用例不监听端口。给测试环境开通 `sandbox.network.allowLocalBinding` 后即可全量通过。
 
 ## 故障排查
 
@@ -281,6 +391,7 @@ npm run check
 ## 相关文档
 
 - [行动计划](docs/action-plan.md)：从「一次运行一个进程」到「常驻 Agent 承载多 Session」，已完成
+- [ANP 常驻运行时方案](docs/anp-runtime-plan.md)：多 agent router、身份与 DID、长期 session、调度、子 agent 与容器隔离
 - [独立运行方案](docs/standalone-plan.md)：把控制面抽成端口，让同一个执行引擎可以脱离 anpio-collab 单独运行，并为任意触发/工具接口预留扩展点
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议

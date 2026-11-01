@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import type { BrainLoopTools } from '../runtime/brain-loop.ts';
 import type { AnpMailbox } from '../runtime/anp/mailbox.ts';
 import type { AgentStore } from '../store/agent-store.ts';
-import { createTools, type ToolExecution } from '../tools.ts';
+import { createTools, type LocalToolExecutor, type ToolExecution } from '../tools.ts';
 import type { ToolCall, ToolSpec } from '../brains/types.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from '../definition.ts';
 import { isLocalTool, isRouterTool } from '../definition.ts';
@@ -36,6 +36,10 @@ export type TurnToolInput = {
   store: AgentStore;
   mailbox: AnpMailbox;
   markReplied: () => void;
+  /** 容器模式下替换本地原语的执行位置。 */
+  local?: LocalToolExecutor;
+  /** 本地原语的清理动作；turn 结束后调用。 */
+  dispose?: () => Promise<void>;
 };
 
 export type TurnToolCallbacks = {
@@ -90,6 +94,7 @@ export function createTurnTools(input: TurnToolInput, callbacks: TurnToolCallbac
     runId: input.turnId,
     definition: input.definition,
     tools: localNames,
+    ...(input.local ? { local: input.local } : {}),
     log: callbacks.log ?? (() => undefined),
   });
   const extraSpecs = input.definition.tools
@@ -210,5 +215,9 @@ export function createTurnTools(input: TurnToolInput, callbacks: TurnToolCallbac
     }
   }
 
-  return { specs, execute };
+  return {
+    specs,
+    execute,
+    ...(input.dispose ? { dispose: input.dispose } : {}),
+  };
 }

@@ -25,6 +25,7 @@ import { acquireLock, type RouterLock } from './lock.ts';
 import { AgentRegistry, type AgentEntry, type RegistryDiff } from './registry.ts';
 import { routeMessage, type RouteDecision, type RoutingCandidate } from './routing.ts';
 import { RouterScheduler } from './scheduler.ts';
+import { ContainerToolExecutor, probeContainer } from './container.ts';
 import { createTurnTools } from './turn-tools.ts';
 
 export type RouterStartOptions = {
@@ -83,6 +84,8 @@ export class RouterRuntime {
   private childTimer: NodeJS.Timeout | null = null;
   private reloadChain: Promise<RegistryDiff>;
   private readonly hostErrors = new Map<string, string>();
+  private containerReady: boolean | null = null;
+  private containerError: string | null = null;
   private closing = false;
 
   private constructor(options: RouterStartOptions, store: RouterStore) {
@@ -565,6 +568,17 @@ export class RouterRuntime {
     return diff;
   }
 
+  private async containerUsable(): Promise<boolean> {
+    if (this.containerReady !== null) return this.containerReady;
+    const probe = await probeContainer(this.config.container);
+    this.containerReady = probe.available;
+    this.containerError = probe.error;
+    if (probe.available) {
+      this.logLine(`容器运行时可用：${probe.version ?? this.config.container.docker}`);
+    }
+    return probe.available;
+  }
+
   private async applyEntry(entry: AgentEntry, startIfMissing: boolean): Promise<void> {
     const agentId = entry.definition.id;
     const existing = this.hosts.get(agentId);
@@ -577,6 +591,21 @@ export class RouterRuntime {
       this.logLine(`[${agentId}] 定义为 disabled，未启动`);
       return;
     }
+
+    if (entry.anp.isolation === 'container') {
+      const usable = await this.containerUsable();
+      if (!usable) {
+        if (!this.config.container.allowMissing) {
+          const message = `容器运行时不可用：${this.containerError ?? this.config.container.docker}`;
+          this.hostErrors.set(agentId, message);
+          this.store.setAgentEnabled(agentId, false);
+          this.logLine(`[${agentId}] ${message}，未启动`);
+          return;
+        }
+        this.logLine(`[${agentId}] 容器运行时不可用，回退为进程内工具执行：${this.containerError ?? ''}`);
+      }
+    }
+
     const maxActiveTurns = entry.anp.maxActiveTurns
       ?? this.config.maxActiveTurns
       ?? entry.definition.concurrency;
@@ -631,41 +660,58 @@ export class RouterRuntime {
       ...(input.workspaceBase ? { workspaceBase: input.workspaceBase } : {}),
       ...(injected ? { brain: injected } : {}),
       ...(brainFactory ? { brainFactory } : {}),
-      toolFactory: toolInput => createTurnTools(
-        {
-          runDir: toolInput.runDir,
-          turnId: toolInput.turnId,
-          definition: toolInput.definition,
-          threadId: toolInput.threadId,
-          triggerMessageId: toolInput.triggerMessageId,
-          store: toolInput.store,
-          mailbox: toolInput.mailbox,
-          markReplied: toolInput.markReplied,
-        },
-        {
-          send: sendInput => this.sendFrom(toolInput.agentId, sendInput),
-          listAgents: () => this.agentSummaries(),
-          agentStatus: id => this.agentStatus(id),
-          spawn: spawnInput => this.spawnAgent(toolInput.agentId, spawnInput),
-          schedules: {
-            create: scheduleInput => {
-              if (!this.scheduler) throw new Error('调度器未启动');
-              return this.scheduler.create(toolInput.agentId, scheduleInput);
-            },
-            cancel: id => {
-              if (!this.scheduler) throw new Error('调度器未启动');
-              return this.scheduler.cancel(toolInput.agentId, id);
-            },
-            list: () => {
-              if (!this.scheduler) throw new Error('调度器未启动');
-              return this.scheduler.list(toolInput.agentId);
-            },
+      toolFactory: toolInput => {
+        const { docker, image, memory, cpus, pidsLimit } = this.config.container;
+        const container = toolInput.entry.anp.isolation === 'container' && this.containerReady === true
+          ? new ContainerToolExecutor({
+              docker,
+              image,
+              memory,
+              cpus,
+              pidsLimit,
+              workspace: toolInput.runDir,
+              agentId: toolInput.agentId,
+              threadId: toolInput.threadId,
+              log: line => this.logLine(`[${toolInput.agentId}] ${line}`),
+            })
+          : null;
+        return createTurnTools(
+          {
+            runDir: toolInput.runDir,
+            turnId: toolInput.turnId,
+            definition: toolInput.definition,
+            threadId: toolInput.threadId,
+            triggerMessageId: toolInput.triggerMessageId,
+            store: toolInput.store,
+            mailbox: toolInput.mailbox,
+            markReplied: toolInput.markReplied,
+            ...(container ? { local: container, dispose: () => container.dispose() } : {}),
           },
-          network: toolInput.entry.anp.network,
-          allowlist: toolInput.entry.anp.networkAllowlist,
-          log: (level, text) => this.logLine(`[${toolInput.agentId}] ${level}: ${text}`),
-        },
-      ),
+          {
+            send: sendInput => this.sendFrom(toolInput.agentId, sendInput),
+            listAgents: () => this.agentSummaries(),
+            agentStatus: id => this.agentStatus(id),
+            spawn: spawnInput => this.spawnAgent(toolInput.agentId, spawnInput),
+            schedules: {
+              create: scheduleInput => {
+                if (!this.scheduler) throw new Error('调度器未启动');
+                return this.scheduler.create(toolInput.agentId, scheduleInput);
+              },
+              cancel: id => {
+                if (!this.scheduler) throw new Error('调度器未启动');
+                return this.scheduler.cancel(toolInput.agentId, id);
+              },
+              list: () => {
+                if (!this.scheduler) throw new Error('调度器未启动');
+                return this.scheduler.list(toolInput.agentId);
+              },
+            },
+            network: toolInput.entry.anp.network,
+            allowlist: toolInput.entry.anp.networkAllowlist,
+            log: (level, text) => this.logLine(`[${toolInput.agentId}] ${level}: ${text}`),
+          },
+        );
+      },
     });
   }
 

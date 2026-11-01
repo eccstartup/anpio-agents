@@ -1,0 +1,78 @@
+{
+  "agents": [
+    {
+      "id": "planner",
+      "name": "规划者（脚本）",
+      "description": "不联网、不需要密钥的演示 agent：收到消息后把清点任务派给 worker。",
+      "capabilities": ["规划", "任务分派"],
+      "provider": {
+        "id": "script",
+        "protocol": "script",
+        "model": "script",
+        "script": [
+          {
+            "tool": "anp_send",
+            "input": {
+              "to": "agent:worker",
+              "text": "请清点当前工作目录，并把结果写成清单。",
+              "type": "anp.task.request"
+            }
+          },
+          {
+            "tool": "finish_turn",
+            "input": { "summary": "已把清点任务派给 worker", "outcome": "done" }
+          }
+        ]
+      },
+      "systemPrompt": "你是演示用的规划者。收到任务后只做分派，不自己执行。",
+      "tools": ["anp_send", "anp_list_messages", "finish_turn", "finish"],
+      "scopes": ["mailbox:read", "mailbox:write"],
+      "limits": { "maxTurns": 8, "timeoutMs": 60000, "maxTokens": 1024 },
+      "anp": { "isolation": "inline", "allowSchedules": false }
+    },
+    {
+      "id": "worker",
+      "name": "执行者（脚本）",
+      "description": "不联网、不需要密钥的演示 agent：清点 workspace 并写一份清单。",
+      "capabilities": ["清点", "文件整理"],
+      "provider": {
+        "id": "script",
+        "protocol": "script",
+        "model": "script",
+        "script": [
+          { "tool": "list_files", "input": { "path": "." } },
+          {
+            "tool": "write_file",
+            "input": {
+              "path": "worker-result.md",
+              "content": "# 清点结果\n\n- 已查看 thread workspace\n- 由脚本 agent 在本地生成，没有调用模型\n"
+            }
+          },
+          {
+            "tool": "anp_reply",
+            "input": { "text": "清点完成，结果写在 worker-result.md。" }
+          },
+          {
+            "tool": "finish_turn",
+            "input": { "summary": "已完成清点并写入 worker-result.md", "outcome": "done" }
+          }
+        ]
+      },
+      "systemPrompt": "你是演示用的执行者。在 workspace 内完成分派的工作。",
+      "tools": [
+        "shell",
+        "read_file",
+        "write_file",
+        "list_files",
+        "anp_reply",
+        "anp_list_messages",
+        "finish_turn",
+        "finish"
+      ],
+      "sandbox": { "shell": true, "shellTimeoutMs": 30000, "maxOutputBytes": 65536 },
+      "scopes": ["mailbox:read", "mailbox:write"],
+      "limits": { "maxTurns": 8, "timeoutMs": 60000, "maxTokens": 1024 },
+      "anp": { "isolation": "inline", "allowSchedules": false }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+FROM node:24-bookworm-slim
+
+RUN useradd --uid 10001 --create-home --home-dir /home/anp anp \
+ && mkdir -p /opt/anp /workspace \
+ && chown -R anp:anp /workspace
+
+COPY --chmod=0555 exec.mjs /opt/anp/exec.mjs
+
+USER 10001:10001
+WORKDIR /workspace
+
+# router 以 --read-only 启动，入口只需要长眠等待 docker exec。
+ENTRYPOINT ["sleep", "infinity"]

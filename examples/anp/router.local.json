@@ -1,0 +1,18 @@
+{
+  "root": ".anp-data",
+  "agentsFile": "agents.json",
+  "didBaseUrl": "http://127.0.0.1:8788",
+  "publicUrl": "http://127.0.0.1:8787",
+  "watchIntervalMs": 2000,
+  "sweepIntervalMs": 1000,
+  "childScanIntervalMs": 60000,
+  "scheduleTickIntervalMs": 1000,
+  "container": {
+    "docker": "docker",
+    "image": "anp-toolbox:latest",
+    "allowMissing": false,
+    "memory": "1g",
+    "cpus": "1",
+    "pidsLimit": 256
+  }
+}

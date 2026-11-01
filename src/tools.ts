@@ -21,9 +21,21 @@ import {
   runShell,
   writeBytesInside,
   writeFileInside,
+  type ShellResult,
 } from './sandbox.ts';
 
 const MAX_RESULT_CHARS = 6_000;
+
+/**
+ * 本地原语的实际执行位置。默认是进程内 sandbox；容器模式换成容器内的
+ * 短期执行通道，模型循环仍然在主机侧。
+ */
+export type LocalToolExecutor = {
+  shell(input: { command: string; timeoutMs: number; maxOutputBytes: number }): Promise<ShellResult>;
+  readFile(relative: string): Promise<string>;
+  writeFile(relative: string, content: string): Promise<number>;
+  listFiles(relative: string): Promise<Array<{ name: string; type: 'dir' | 'file' | 'link' }>>;
+};
 
 export type ToolExecution = {
   content: string;
@@ -43,6 +55,8 @@ export type ToolOptions = {
   definition: EmbeddedAgentDefinition;
   /** 实际生效的工具清单；缺省用 definition.tools。 */
   tools?: readonly EmbeddedTool[];
+  /** 本地原语的执行位置；缺省在当前进程的 runDir 内。 */
+  local?: LocalToolExecutor;
   log: ToolLog;
 };
 
@@ -241,6 +255,12 @@ export function createTools(options: ToolOptions) {
   const enabledTools = options.tools ?? definition.tools;
   const enabled = new Set<string>(enabledTools);
   const specs = enabledTools.map(tool => TOOL_SPECS[tool]).filter((spec): spec is ToolSpec => Boolean(spec));
+  const local: LocalToolExecutor = options.local ?? {
+    shell: input => runShell({ ...input, cwd: runDir }),
+    readFile: relative => readFileInside(runDir, relative),
+    writeFile: (relative, content) => writeFileInside(runDir, relative, content),
+    listFiles: relative => listFilesInside(runDir, relative),
+  };
 
   const platform = (): ToolBackend => {
     if (!backend) throw new Error('当前运行环境没有平台工具后端');
@@ -375,9 +395,8 @@ export function createTools(options: ToolOptions) {
         }
         case 'shell': {
           if (!definition.sandbox.shell) throw new Error('这一轮没有开启 shell');
-          const result = await runShell({
+          const result = await local.shell({
             command: textOf(input, 'command', 8_000),
-            cwd: runDir,
             timeoutMs: definition.sandbox.shellTimeoutMs,
             maxOutputBytes: definition.sandbox.maxOutputBytes,
           });
@@ -392,13 +411,13 @@ export function createTools(options: ToolOptions) {
           };
         }
         case 'read_file':
-          return { content: render(await readFileInside(runDir, textOf(input, 'path', 1_000))) };
+          return { content: render(await local.readFile(textOf(input, 'path', 1_000))) };
         case 'write_file': {
-          const bytes = await writeFileInside(runDir, textOf(input, 'path', 1_000), textOf(input, 'content'));
+          const bytes = await local.writeFile(textOf(input, 'path', 1_000), textOf(input, 'content'));
           return { content: `已写入 ${bytes} 字节` };
         }
         case 'list_files': {
-          const entries = await listFilesInside(runDir, input.path === undefined ? '.' : textOf(input, 'path', 1_000));
+          const entries = await local.listFiles(input.path === undefined ? '.' : textOf(input, 'path', 1_000));
           return { content: render(entries) };
         }
         case 'finish':
