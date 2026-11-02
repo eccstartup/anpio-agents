@@ -103,6 +103,8 @@ export class AnpMailbox implements MailboxPort {
   private readonly log: (line: string) => void;
   private readonly sessions = new Map<string, OpenSession>();
   private readonly leases = new Map<string, Set<string>>();
+  /** 最近一次 sync() 里服务端报告已超出保留窗口、再也拉不到的条数。 */
+  private lastAgedOut = 0;
 
   constructor(options: AnpMailboxOptions) {
     this.store = options.store;
@@ -118,6 +120,7 @@ export class AnpMailbox implements MailboxPort {
     let cursor = this.store.getCursor(CURSOR_KEY) ?? 0;
     let added = 0;
     let hasMore = false;
+    let agedOut = 0;
     for (let page = 0; page < 50; page += 1) {
       const result = await this.client.sync({ since: cursor, limit: 100 });
       for (const message of result.messages) {
@@ -139,6 +142,7 @@ export class AnpMailbox implements MailboxPort {
         });
         if (inserted) added += 1;
       }
+      agedOut += result.agedOut;
       if (result.agedOut > 0) {
         this.log(`sync.delta 有 ${result.agedOut} 条投递已超出保留窗口，无法再拉取`);
       }
@@ -152,7 +156,13 @@ export class AnpMailbox implements MailboxPort {
       if (next <= cursor) break;
       cursor = next;
     }
+    this.lastAgedOut = agedOut;
     return { added, cursor, hasMore };
+  }
+
+  /** 最近一次 sync() 累计的 aged_out；用于 /health 观测。 */
+  agedOut(): number {
+    return this.lastAgedOut;
   }
 
   async send(input: {

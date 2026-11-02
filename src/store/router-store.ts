@@ -21,6 +21,9 @@ export type ThreadRow = {
   owner_agent_id: string | null;
   title: string | null;
   state: string;
+  /** 1 = 没有显式 conversation_id 的一次性 thread，TTL 到期后归档。 */
+  ephemeral: number;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -169,6 +172,14 @@ const ROUTER_MIGRATIONS = [
       'CREATE INDEX IF NOT EXISTS agent_links_parent ON agent_links (parent_id, state)',
     ],
   },
+  {
+    version: 2,
+    statements: [
+      'ALTER TABLE threads ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE threads ADD COLUMN archived_at TEXT',
+      'CREATE INDEX IF NOT EXISTS threads_ephemeral ON threads (ephemeral, state, updated_at)',
+    ],
+  },
 ];
 
 export type AgentRegistration = {
@@ -250,21 +261,36 @@ export class RouterStore {
     ownerAgentId?: string | null;
     title?: string | null;
     state?: string;
+    /** 没有显式 conversation_id 的一次性 thread；只在首次 INSERT 时落库。 */
+    ephemeral?: boolean;
+    /** 新消息带显式 conversation_id；命中已归档 thread 时允许复活。 */
+    explicit?: boolean;
   }): ThreadRow {
     const now = nowIso();
     this.db.run(
-      `INSERT INTO threads (thread_id, owner_agent_id, title, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO threads (thread_id, owner_agent_id, title, state, ephemeral, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET
          owner_agent_id = COALESCE(threads.owner_agent_id, excluded.owner_agent_id),
          title = COALESCE(threads.title, excluded.title),
+         state = CASE
+           WHEN threads.state = 'archived' AND ? = 1 THEN 'open'
+           ELSE threads.state
+         END,
+         archived_at = CASE
+           WHEN threads.state = 'archived' AND ? = 1 THEN NULL
+           ELSE threads.archived_at
+         END,
          updated_at = excluded.updated_at`,
       input.threadId,
       input.ownerAgentId ?? null,
       input.title ?? null,
       input.state ?? 'open',
+      input.ephemeral ? 1 : 0,
       now,
       now,
+      input.explicit ? 1 : 0,
+      input.explicit ? 1 : 0,
     );
     return this.getThread(input.threadId)!;
   }
@@ -289,6 +315,44 @@ export class RouterStore {
 
   setThreadState(threadId: string, state: string): void {
     this.db.run('UPDATE threads SET state = ?, updated_at = ? WHERE thread_id = ?', state, nowIso(), threadId);
+  }
+
+  /**
+   * 归档超过 TTL 的一次性 thread。`skip` 用于跳过正在跑 turn 的 thread：
+   * 它们保持 open，下一轮仍会被选中。
+   */
+  archiveEphemeralThreads(
+    cutoffIso: string,
+    skip?: (thread: ThreadRow) => boolean,
+  ): ThreadRow[] {
+    return this.db.tx(() => {
+      const rows = this.db.all<ThreadRow>(
+        `SELECT * FROM threads
+         WHERE state != 'archived' AND ephemeral = 1 AND updated_at <= ?`,
+        cutoffIso,
+      );
+      const archivedAt = nowIso();
+      const archived: ThreadRow[] = [];
+      for (const row of rows) {
+        if (skip?.(row)) continue;
+        this.db.run(
+          "UPDATE threads SET state = 'archived', archived_at = ? WHERE thread_id = ? AND state != 'archived'",
+          archivedAt,
+          row.thread_id,
+        );
+        archived.push({ ...row, state: 'archived', archived_at: archivedAt });
+      }
+      return archived;
+    });
+  }
+
+  /** 一次性 thread 归档时一并归档它的 session；未 ack 的 inbox 行保留。 */
+  archiveSessionsForThread(threadId: string): void {
+    this.db.run(
+      "UPDATE sessions SET state = 'archived', active_turn_id = NULL, updated_at = ? WHERE thread_id = ?",
+      nowIso(),
+      threadId,
+    );
   }
 
   addMember(threadId: string, agentId: string, role = 'member'): void {

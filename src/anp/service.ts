@@ -12,13 +12,17 @@ import { decodeMultibaseKey, DidKeyResolver } from '@anpio-cli/core';
 import {
   buildServiceEntry,
   createDispatch,
+  createEgress,
+  createRelay,
   createServer,
   loadConfig,
+  loadHttpSigner,
   openObjectStore,
   openStorage,
   RPC_PATH,
   WELL_KNOWN_PATH,
   type Config,
+  type Relay,
   type RpcHandler,
   type RpcRequest,
   type Storage,
@@ -30,6 +34,8 @@ export type DeliveredEvent = {
   messageId: string | null;
   senderDid: string | null;
   method: string;
+  /** 请求里没有显式 conversation_id；thread 只按 message_id 存在，可被 TTL 归档。 */
+  ephemeral: boolean;
 };
 
 export type AnpServiceOptions = {
@@ -43,6 +49,15 @@ export type AnpServiceOptions = {
   onDelivered?: (event: DeliveredEvent) => void;
   log?: (line: string) => void;
   env?: NodeJS.ProcessEnv;
+  /** 启用跨域投递；缺省只有本机目标可投。 */
+  crossDomain?: {
+    /** 本机 DID；命中时不做任何 HTTP 发现，直接本地受理。 */
+    localTargets: () => Set<string>;
+    /** 允许的远端域名（精确或 `*.` 前缀）；同时放宽入站验签。 */
+    allowedDidHosts?: string[];
+    /** 测试替身；缺省用 createRelay 构造真实出站。 */
+    relay?: Relay;
+  };
 };
 
 export type AnpService = {
@@ -84,16 +99,21 @@ class LocalFirstResolver implements KeyResolver {
 
 function envFor(options: AnpServiceOptions): NodeJS.ProcessEnv {
   const publicUrl = options.publicUrl.replace(/\/$/, '');
-  const hosts = [new URL(publicUrl).host, new URL(options.didBaseUrl).host];
+  const base = options.env ?? process.env;
+  const hosts = [...new Set([
+    new URL(publicUrl).host,
+    new URL(options.didBaseUrl).host,
+    ...(options.crossDomain?.allowedDidHosts ?? []),
+  ])];
   return {
-    ...options.env,
+    ...base,
     ANPIOCLI_LISTEN: `${options.listen.host}:${options.listen.port}`,
     ANPIOCLI_PUBLIC_URL: publicUrl,
     ANPIOCLI_DB: join(options.directory, 'service.db'),
     ANPIOCLI_OBJECT_DIR: join(options.directory, 'objects'),
     ANPIOCLI_DID_DEV_HOSTS: hosts.join(','),
     ANPIOCLI_ALLOWED_DID_HOSTS: hosts.join(','),
-    ANPIOCLI_DID_CACHE_TTL_MS: options.env?.ANPIOCLI_DID_CACHE_TTL_MS ?? '60000',
+    ANPIOCLI_DID_CACHE_TTL_MS: base.ANPIOCLI_DID_CACHE_TTL_MS ?? '60000',
   };
 }
 
@@ -106,12 +126,22 @@ export function parseReply(reply: { status: number; body: string }): Record<stri
   }
 }
 
-export function createAnpService(options: AnpServiceOptions): AnpService {
+export async function createAnpService(options: AnpServiceOptions): Promise<AnpService> {
   const config = loadConfig(envFor(options));
   mkdirSync(options.directory, { recursive: true, mode: 0o700 });
   const storage = openStorage({ path: config.dbPath });
   const objects = openObjectStore({ directory: config.objectDir, maxBytes: config.maxObjectBytes });
   const resolver = new LocalFirstResolver(options.localKeys, new DidKeyResolver());
+
+  let relay: Relay | undefined;
+  if (options.crossDomain) {
+    const localTargets = options.crossDomain.localTargets;
+    const base = options.crossDomain.relay ?? await buildRelay(config, options.log);
+    relay = {
+      forward: async (request, targetDid) =>
+        localTargets().has(targetDid) ? { kind: 'local' } : base.forward(request, targetDid),
+    };
+  }
 
   let inner: RpcHandler;
   const handleRpc: RpcHandler = async (request: RpcRequest) => {
@@ -125,16 +155,20 @@ export function createAnpService(options: AnpServiceOptions): AnpService {
         const response = JSON.parse(reply.body) as { result?: { accepted?: boolean; message_id?: string; conversation_id?: string } };
         const targetDid = parsed.params?.meta?.target?.did;
         if (parsed.method === 'direct.send' && targetDid && response.result?.accepted) {
+          const nonEmpty = (value: unknown): string | undefined =>
+            typeof value === 'string' && value.trim() !== '' ? value : undefined;
+          const conversationId = nonEmpty(parsed.params?.body?.conversation_id);
           options.onDelivered({
             targetDid,
             threadId:
-              response.result.conversation_id ??
-              parsed.params?.body?.conversation_id ??
-              parsed.params?.meta?.message_id ??
-              'unknown',
+              nonEmpty(response.result.conversation_id)
+              ?? conversationId
+              ?? parsed.params?.meta?.message_id
+              ?? 'unknown',
             messageId: response.result.message_id ?? parsed.params?.meta?.message_id ?? null,
             senderDid: parsed.params?.meta?.sender_did ?? null,
             method: parsed.method,
+            ephemeral: conversationId === undefined,
           });
         }
       } catch {
@@ -150,6 +184,7 @@ export function createAnpService(options: AnpServiceOptions): AnpService {
     objects,
     resolver,
     resolverOptions: config.didResolution,
+    ...(relay ? { relay } : {}),
     ...(options.log ? { log: options.log } : {}),
   });
 
@@ -157,7 +192,8 @@ export function createAnpService(options: AnpServiceOptions): AnpService {
   const server = createServer({ config, handleRpc, wellKnown });
   const address = { host: options.listen.host, port: options.listen.port };
 
-  const call = async (request: unknown): Promise<Record<string, unknown>> => {    const reply = await handleRpc({
+  const call = async (request: unknown): Promise<Record<string, unknown>> => {
+    const reply = await handleRpc({
       body: JSON.stringify(request),
       headers: {},
       url: new URL(`${config.publicUrl.replace(/\/$/, '')}${RPC_PATH}`),
@@ -188,3 +224,9 @@ export function createAnpService(options: AnpServiceOptions): AnpService {
 }
 
 export { RPC_PATH, WELL_KNOWN_PATH };
+
+async function buildRelay(config: Config, log?: (line: string) => void): Promise<Relay> {
+  const signer = await loadHttpSigner(config);
+  const egress = createEgress({ config, ...(signer ? { signer } : {}) });
+  return createRelay({ config, egress, ...(log ? { log } : {}) });
+}

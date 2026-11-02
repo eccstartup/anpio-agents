@@ -327,8 +327,13 @@ export class AnpTurnSession implements SessionTask {
       !trigger.ref.taskId
       && (trigger.kind === 'anp.chat.message' || trigger.kind === 'anp.schedule.fire')
     ) return;
+    // 控制消息不自动回复，避免回声。
+    if (trigger.kind.startsWith('anp.control.')) return;
     if (!this.canDeliver(targetDid)) {
-      this.log('warn', `触发消息来自外部 DID ${targetDid}，v1 未启用跨域 relay，跳过自动回复`);
+      this.log(
+        'warn',
+        `触发消息来自外部 DID ${targetDid}，但目标不在本机也不在允许的跨域域名内，跳过自动回复`,
+      );
       return;
     }
     try {

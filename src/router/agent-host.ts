@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AnpSigningIdentity } from '@anpio-cli/core';
 import type { Brain } from '../brains/types.ts';
@@ -18,7 +19,7 @@ import { AgentRuntime } from '../runtime/agent.ts';
 import type { BrainLoopTools } from '../runtime/brain-loop.ts';
 import type { AgentTransport } from '../runtime/transport.ts';
 import type { SessionResult } from '../runtime/types.ts';
-import { ANP_ENVIRONMENT } from '../runtime/anp/context.ts';
+import { ANP_ENVIRONMENT, threadWorkspace } from '../runtime/anp/context.ts';
 import { AnpMailbox } from '../runtime/anp/mailbox.ts';
 import { AnpTurnLedger } from '../runtime/anp/ledger.ts';
 import { AnpTurnSession } from '../runtime/anp/session.ts';
@@ -141,6 +142,24 @@ export class AgentHost {
 
   get activeTurns(): number {
     return this.running.size;
+  }
+
+  /** 最近一次扫描里所有信箱累计的 aged_out 条数；供 /health 观测。 */
+  agedOut(): number {
+    let total = 0;
+    for (const mailbox of this.mailboxes.values()) total += mailbox.agedOut();
+    return total;
+  }
+
+  /** thread 是否正在跑 turn；一次性 thread 归档前要跳过它。 */
+  hasRunningThread(threadId: string): boolean {
+    return this.running.has(threadId);
+  }
+
+  /** 归档一次性 thread：只删 workspace/threads/<threadId>，消息与 notes 保留。 */
+  async archiveThread(threadId: string): Promise<void> {
+    this.mailboxes.delete(threadId);
+    await rm(threadWorkspace(this.directory, threadId), { recursive: true, force: true });
   }
 
   get lastError(): string | null {

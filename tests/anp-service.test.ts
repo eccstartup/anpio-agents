@@ -36,7 +36,7 @@ test('ANP 服务：进程内 direct.send 受理、落库并唤醒目标', async 
     [bob.did, multibaseOf(bob)],
   ]);
   const delivered: DeliveredEvent[] = [];
-  const service = createAnpService({
+  const service = await createAnpService({
     directory: join(dir, 'anp'),
     listen: { host: '127.0.0.1', port: 0 },
     publicUrl: endpoints.publicUrl,
@@ -91,6 +91,7 @@ test('ANP 服务：进程内 direct.send 受理、落库并唤醒目标', async 
         messageId: 'msg-1',
         senderDid: alice.did,
         method: 'direct.send',
+        ephemeral: false,
       },
     ]);
 
@@ -113,7 +114,7 @@ test('ANP 服务：签名错误的发送方被拒绝', async () => {
     [alice.did, multibaseOf(alice)],
     [bob.did, multibaseOf(bob)],
   ]);
-  const service = createAnpService({
+  const service = await createAnpService({
     directory: join(dir, 'anp'),
     listen: { host: '127.0.0.1', port: 0 },
     publicUrl: endpoints.publicUrl,

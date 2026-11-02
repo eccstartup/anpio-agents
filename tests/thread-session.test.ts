@@ -115,7 +115,7 @@ test('ANP Turn：同一个 thread 多轮复用 workspace，重启后继续，历
     [alice.did, multibaseOf(alice)],
     [bob.did, multibaseOf(bob)],
   ]);
-  const service = createAnpService({
+  const service = await createAnpService({
     directory: join(dir, 'anp'),
     listen: { host: '127.0.0.1', port: 0 },
     publicUrl: endpoints.publicUrl,
@@ -265,7 +265,7 @@ test('ANP Turn：触发消息来自外部 DID 时，没有 relay 就跳过自动
     [alice.did, multibaseOf(alice)],
     [bob.did, multibaseOf(bob)],
   ]);
-  const service = createAnpService({
+  const service = await createAnpService({
     directory: join(dir, 'anp'),
     listen: { host: '127.0.0.1', port: 0 },
     publicUrl: endpoints.publicUrl,

@@ -9,6 +9,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Brain } from '../brains/types.ts';
+import type { Relay } from '@anpio-cli/service';
 import { createDidServer, type DidServerAgent, type RunningDidServer } from '../anp/did-server.ts';
 import { agentDescriptionFor } from '../anp/description.ts';
 import { fingerprintOfDid, type ServiceEndpoints } from '../anp/identity.ts';
@@ -22,6 +23,7 @@ import { createAdmin, type AdminSendInput, type AdminSendResult } from './admin.
 import { AgentHost } from './agent-host.ts';
 import type { RouterConfig } from './config.ts';
 import { Delivery } from './delivery.ts';
+import { didHostAllowed } from './cross-domain.ts';
 import { acquireLock, type RouterLock } from './lock.ts';
 import { AgentRegistry, type AgentEntry, type RegistryDiff } from './registry.ts';
 import { routeMessage, type RouteDecision, type RoutingCandidate } from './routing.ts';
@@ -38,6 +40,10 @@ export type RouterStartOptions = {
   brainFactory?: (agentId: string, definition: EmbeddedAgentDefinition) => Brain | undefined;
   /** false 时不监听端口；测试用进程内调用。 */
   listen?: boolean;
+  /** 测试替身：跨域 relay；缺省由 ANP 服务自己构造。 */
+  relay?: Relay;
+  /** 测试用可控时钟；缺省 Date.now。 */
+  now?: () => number;
 };
 
 export type RouterStatus = {
@@ -45,6 +51,7 @@ export type RouterStatus = {
   agents: number;
   activeTurns: number;
   pendingMessages: number;
+  agedOutMessages: number;
   service: { host: string; port: number };
   didServer: { host: string; port: number } | null;
   lock: RouterLock['info'];
@@ -83,6 +90,7 @@ export class RouterRuntime {
   private scheduler: RouterScheduler | null = null;
   private watcher: NodeJS.Timeout | null = null;
   private childTimer: NodeJS.Timeout | null = null;
+  private ephemeralTimer: NodeJS.Timeout | null = null;
   private reloadChain: Promise<RegistryDiff>;
   private readonly hostErrors = new Map<string, string>();
   private containerReady: boolean | null = null;
@@ -148,7 +156,10 @@ export class RouterRuntime {
     const from = this.hosts.get(input.from);
     if (!from) throw new Error(`agent 不存在或未启动：${input.from}`);
     const explicit = input.to?.trim();
-    if (explicit) this.resolveTarget(explicit);
+    if (explicit) {
+      const target = this.resolveTarget(explicit);
+      if (!target.host) throw new Error('管理接口只投本机，不能发送到外部 DID');
+    }
     const route = this.route({ to: input.to, threadId: input.threadId, skills: input.skills });
     if (!route) throw new Error('没有可投递的目标 agent');
     const target = this.hosts.get(route.agentId);
@@ -167,7 +178,7 @@ export class RouterRuntime {
     const from = this.hosts.get(fromAgentId);
     if (!from) throw new Error(`agent 不存在或未启动：${fromAgentId}`);
     const target = this.resolveTarget(input.to);
-    this.delivery?.wakeHost(target.host, input.threadId, from);
+    if (target.host) this.delivery?.wakeHost(target.host, input.threadId, from);
     const sent = await from.send(target.did, input.threadId, input.payload, input.replyTo ?? null);
     return {
       messageId: sent.messageId,
@@ -351,6 +362,35 @@ export class RouterRuntime {
     return ids;
   }
 
+  /** 归档超过 TTL 的一次性 thread；正在跑 turn 的留到下一轮。 */
+  async sweepEphemeralThreads(now = this.clock()): Promise<Array<{ threadId: string; agentId: string | null }>> {
+    const cutoff = new Date(now - this.config.ephemeralThreadTtlMs).toISOString();
+    const rows = this.store.archiveEphemeralThreads(cutoff, thread => {
+      const owner = thread.owner_agent_id ? this.hosts.get(thread.owner_agent_id) : undefined;
+      return owner?.hasRunningThread(thread.thread_id) ?? false;
+    });
+    const archived: Array<{ threadId: string; agentId: string | null }> = [];
+    for (const thread of rows) {
+      const ownerId = thread.owner_agent_id;
+      const host = ownerId ? this.hosts.get(ownerId) : undefined;
+      if (host) {
+        await host.archiveThread(thread.thread_id).catch(error => {
+          this.logLine(
+            `[${ownerId}] 删除 thread workspace 失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
+      this.store.archiveSessionsForThread(thread.thread_id);
+      this.logLine(`一次性 thread 已归档：${thread.thread_id}${ownerId ? `（${ownerId}）` : ''}`);
+      archived.push({ threadId: thread.thread_id, agentId: ownerId });
+    }
+    return archived;
+  }
+
+  private clock(): number {
+    return this.options.now ? this.options.now() : Date.now();
+  }
+
   /** 把所有 host 的待处理消息跑到静止；主要给测试和一次性的管理操作使用。 */
   async drain(rounds = 8): Promise<void> {
     let previous = '';
@@ -374,6 +414,7 @@ export class RouterRuntime {
       agents: agents.length,
       activeTurns: agents.reduce((total, host) => total + host.activeTurns, 0),
       pendingMessages: agents.reduce((total, host) => total + host.dataStore.pendingInboxCount(), 0),
+      agedOutMessages: agents.reduce((total, host) => total + host.agedOut(), 0),
       service: this.serviceAddress ?? { host: this.config.anpListen.host, port: this.config.anpListen.port },
       didServer: this.didServerAddress,
       lock: this.lock?.info ?? { pid: process.pid, startedAt: this.startedAt },
@@ -396,6 +437,8 @@ export class RouterRuntime {
     this.watcher = null;
     if (this.childTimer) clearInterval(this.childTimer);
     this.childTimer = null;
+    if (this.ephemeralTimer) clearInterval(this.ephemeralTimer);
+    this.ephemeralTimer = null;
     for (const host of this.hosts.values()) {
       await host.stop().catch(() => undefined);
     }
@@ -425,15 +468,24 @@ export class RouterRuntime {
       rpcPath: RPC_PATH,
     };
 
-    this.service = createAnpService({
+    this.service = await createAnpService({
       directory: join(this.config.root, 'anp'),
       listen: this.config.anpListen,
       publicUrl: this.config.publicUrl,
       didBaseUrl: this.config.didBaseUrl,
       localKeys: () => this.localKeys(),
       onDelivered: event => {
-        this.delivery?.wake(event.targetDid, event.threadId, event.senderDid);
+        this.delivery?.wake(event.targetDid, event.threadId, event.senderDid, event.ephemeral);
       },
+      ...(this.config.crossDomain.enabled
+        ? {
+            crossDomain: {
+              localTargets: () => new Set([...this.hosts.values()].map(host => host.did)),
+              allowedDidHosts: this.config.crossDomain.allowedDidHosts,
+              ...(this.options.relay ? { relay: this.options.relay } : {}),
+            },
+          }
+        : {}),
       log: line => this.logLine(`[anp] ${line}`),
     });
     this.delivery = new Delivery({
@@ -511,6 +563,15 @@ export class RouterRuntime {
         });
       }, this.config.childScanIntervalMs);
       this.childTimer.unref?.();
+    }
+
+    if (this.config.ephemeralSweepIntervalMs > 0) {
+      this.ephemeralTimer = setInterval(() => {
+        void this.sweepEphemeralThreads().catch(error => {
+          this.logLine(`一次性 thread 归档失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+      }, this.config.ephemeralSweepIntervalMs);
+      this.ephemeralTimer.unref?.();
     }
   }
 
@@ -660,7 +721,10 @@ export class RouterRuntime {
       log: line => this.logLine(line),
       maxActiveTurns: input.maxActiveTurns,
       sweepIntervalMs: this.config.sweepIntervalMs,
-      canDeliver: did => this.hostByDid(did) !== undefined,
+      canDeliver: did =>
+        this.hostByDid(did) !== undefined
+        || (this.config.crossDomain.enabled
+          && didHostAllowed(did, this.config.crossDomain.allowedDidHosts)),
       ...(input.workspaceBase ? { workspaceBase: input.workspaceBase } : {}),
       ...(injected ? { brain: injected } : {}),
       ...(brainFactory ? { brainFactory } : {}),
@@ -726,13 +790,19 @@ export class RouterRuntime {
     return undefined;
   }
 
-  private resolveTarget(to: string): { did: string; host: AgentHost } {
+  private resolveTarget(to: string): { did: string; host?: AgentHost } {
     const target = to.trim();
     if (target === '') throw new Error('目标 agent 不能为空');
     if (target.startsWith('did:')) {
       const host = this.hostByDid(target);
-      if (!host) throw new UnroutableTargetError(target);
-      return { did: target, host };
+      if (host) return { did: target, host };
+      if (
+        this.config.crossDomain.enabled
+        && didHostAllowed(target, this.config.crossDomain.allowedDidHosts)
+      ) {
+        return { did: target };
+      }
+      throw new UnroutableTargetError(target);
     }
     const agentId = target.startsWith('agent:') ? target.slice('agent:'.length) : target;
     const host = this.hosts.get(agentId);

@@ -7,6 +7,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { parseAllowedHost } from './cross-domain.ts';
 
 export class RouterConfigError extends Error {
   override name = 'RouterConfigError';
@@ -37,6 +38,15 @@ export type RouterConfig = {
   childScanIntervalMs: number;
   /** 定时调度 tick 间隔；0 表示不自动触发。 */
   scheduleTickIntervalMs: number;
+  /** 没有 conversation_id 的一次性 thread 保留多久后归档。 */
+  ephemeralThreadTtlMs: number;
+  /** 归档扫描间隔；0 表示关闭自动扫描。 */
+  ephemeralSweepIntervalMs: number;
+  /** 跨域投递：默认关闭；启用时允许清单必须非空。 */
+  crossDomain: {
+    enabled: boolean;
+    allowedDidHosts: string[];
+  };
   /** 容器隔离：工具执行的 docker 与资源上限。 */
   container: {
     docker: string;
@@ -59,6 +69,9 @@ const DEFAULTS = {
   sweepIntervalMs: 1_000,
   childScanIntervalMs: 60_000,
   scheduleTickIntervalMs: 1_000,
+  ephemeralThreadTtlMs: 3_600_000,
+  ephemeralSweepIntervalMs: 60_000,
+  crossDomain: { enabled: false, allowedDidHosts: [] as string[] },
   container: {
     docker: 'docker',
     image: 'anp-toolbox:latest',
@@ -143,6 +156,33 @@ function envBoolean(value: string, path: string): boolean {
   fail(path, `不是布尔值：${value}`);
 }
 
+function envNonNegativeInt(value: string, path: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) fail(path, '必须是非负整数');
+  return number;
+}
+
+function hostList(values: unknown, path: string): string[] {
+  if (!Array.isArray(values)) fail(path, '必须是字符串数组');
+  return values.map((value, index) => {
+    if (typeof value !== 'string') fail(`${path}[${index}]`, '必须是字符串');
+    const host = parseAllowedHost(value);
+    if (!host) fail(`${path}[${index}]`, `不是合法域名：${value}`);
+    return host;
+  });
+}
+
+function envHostList(value: string, path: string): string[] {
+  return value
+    .split(/[\s,]+/)
+    .filter(part => part !== '')
+    .map(part => {
+      const host = parseAllowedHost(part);
+      if (!host) fail(path, `不是合法域名：${part}`);
+      return host;
+    });
+}
+
 function parsePidsLimit(value: unknown, path: string): number {
   const number = typeof value === 'string' ? Number(value) : value;
   if (typeof number !== 'number' || !Number.isInteger(number) || number < 16 || number > 100_000) {
@@ -221,6 +261,22 @@ export function parseRouterConfig(
     ),
   };
 
+  const crossRaw = root.crossDomain === undefined ? {} : record(root.crossDomain, 'crossDomain');
+  const crossDomain = {
+    enabled: env.ANP_CROSS_DOMAIN !== undefined
+      ? envBoolean(env.ANP_CROSS_DOMAIN, 'ANP_CROSS_DOMAIN')
+      : parseBoolean(crossRaw.enabled, 'crossDomain.enabled', DEFAULTS.crossDomain.enabled),
+    allowedDidHosts: env.ANP_ALLOWED_DID_HOSTS !== undefined
+      ? envHostList(env.ANP_ALLOWED_DID_HOSTS, 'ANP_ALLOWED_DID_HOSTS')
+      : hostList(
+          crossRaw.allowedDidHosts ?? DEFAULTS.crossDomain.allowedDidHosts,
+          'crossDomain.allowedDidHosts',
+        ),
+  };
+  if (crossDomain.enabled && crossDomain.allowedDidHosts.length === 0) {
+    fail('crossDomain.allowedDidHosts', '启用跨域时必须至少配置一个允许的域名');
+  }
+
   return {
     root: rootPath,
     didBaseUrl,
@@ -244,6 +300,21 @@ export function parseRouterConfig(
       'scheduleTickIntervalMs',
       DEFAULTS.scheduleTickIntervalMs,
     ),
+    ephemeralThreadTtlMs: env.ANP_EPHEMERAL_THREAD_TTL_MS !== undefined
+      ? envNonNegativeInt(env.ANP_EPHEMERAL_THREAD_TTL_MS, 'ANP_EPHEMERAL_THREAD_TTL_MS')
+      : parseNonNegativeInt(
+          root.ephemeralThreadTtlMs,
+          'ephemeralThreadTtlMs',
+          DEFAULTS.ephemeralThreadTtlMs,
+        ),
+    ephemeralSweepIntervalMs: env.ANP_EPHEMERAL_SWEEP_INTERVAL_MS !== undefined
+      ? envNonNegativeInt(env.ANP_EPHEMERAL_SWEEP_INTERVAL_MS, 'ANP_EPHEMERAL_SWEEP_INTERVAL_MS')
+      : parseNonNegativeInt(
+          root.ephemeralSweepIntervalMs,
+          'ephemeralSweepIntervalMs',
+          DEFAULTS.ephemeralSweepIntervalMs,
+        ),
+    crossDomain,
     container,
   };
 }

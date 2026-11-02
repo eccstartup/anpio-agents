@@ -10,10 +10,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { Brain, BrainResponse } from '../src/brains/types.ts';
+import type { AnpClient } from '../src/anp/client.ts';
 import { parseRouterConfig } from '../src/router/config.ts';
 import { acquireLock, RouterLockError } from '../src/router/lock.ts';
 import { routeMessage } from '../src/router/routing.ts';
 import { startRouter, type RouterRuntime } from '../src/router/router.ts';
+import { AnpMailbox } from '../src/runtime/anp/mailbox.ts';
 
 class ScriptedBrain implements Brain {
   private index = 0;
@@ -192,6 +194,36 @@ test('Router：没有 relay 时拒绝本机之外的出站 DID', async () => {
         'SELECT COUNT(*) AS count FROM outbox',
       );
       assert.equal(outbox?.count, 0, '被拒绝的目标不能进入 outbox');
+    },
+  );
+});
+
+test('Router：sync.delta 的 aged_out 累计进 health', async () => {
+  await withRouter(
+    [agent('planner', ['规划'])],
+    {
+      planner: new ScriptedBrain([{ tool: 'finish', input: { summary: 'ok' } }]),
+    },
+    async router => {
+      const host = router.getAgent('planner')!;
+      const client = {
+        async sync() {
+          return { messages: [], nextSince: 0, hasMore: false, agedOut: 5 };
+        },
+      } as unknown as AnpClient;
+      const box = new AnpMailbox({
+        store: host.dataStore,
+        client,
+        threadId: 'thread-aged',
+      });
+      await box.sync();
+      assert.equal(box.agedOut(), 5);
+
+      // host 按 thread 缓存 mailbox；把这份已同步的信箱放进缓存验证汇总。
+      (host as unknown as { mailboxes: Map<string, AnpMailbox> })
+        .mailboxes.set('thread-aged', box);
+      assert.equal(host.agedOut(), 5);
+      assert.equal(router.status().agedOutMessages, 5);
     },
   );
 });

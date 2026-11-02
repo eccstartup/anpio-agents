@@ -29,7 +29,7 @@ test('ANP 信箱：发送、同步、拉取、确认与去重', async () => {
     [alice.did, multibaseOf(alice)],
     [bob.did, multibaseOf(bob)],
   ]);
-  const service = createAnpService({
+  const service = await createAnpService({
     directory: join(dir, 'anp'),
     listen: { host: '127.0.0.1', port: 0 },
     publicUrl: endpoints.publicUrl,
@@ -161,7 +161,7 @@ test('ANP 信箱：nack 延迟重投；离线时出站排队并退避', async ()
     [alice.did, multibaseOf(alice)],
     [bob.did, multibaseOf(bob)],
   ]);
-  const service = createAnpService({
+  const service = await createAnpService({
     directory: join(dir, 'anp'),
     listen: { host: '127.0.0.1', port: 0 },
     publicUrl: endpoints.publicUrl,

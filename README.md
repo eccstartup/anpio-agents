@@ -224,7 +224,7 @@ npm run anp:send -- --from planner --to worker --thread t1 --text "把这份目�
 3. `GET /admin/agents/<id>` 能看到 session、最近 turn 与 `lastError`；
 4. 定义里开启 `anp.allowSchedules` 后，`schedule_create` 的 `at` / `interval` / `cron` 任务按点触发且只触发一次。
 
-配置字段：`root`、`agentsFile`、`didBaseUrl`、`publicUrl`、`listen`（DID/管理）、`anpListen`（ANP 服务）、`adminToken`、`defaultAgent`、`maxActiveTurns`、`routing.strategy`（当前为 `deterministic`）、`watchIntervalMs`、`sweepIntervalMs`、`childScanIntervalMs`、`scheduleTickIntervalMs`，以及下面的 `container`。对应环境变量以 `ANP_` 开头（如 `ANP_ROOT`、`ANP_ADMIN_TOKEN`、`ANP_CONTAINER_IMAGE`），相对路径按配置文件目录解析。
+配置字段：`root`、`agentsFile`、`didBaseUrl`、`publicUrl`、`listen`（DID/管理）、`anpListen`（ANP 服务）、`adminToken`、`defaultAgent`、`maxActiveTurns`、`routing.strategy`（当前为 `deterministic`）、`watchIntervalMs`、`sweepIntervalMs`、`childScanIntervalMs`、`scheduleTickIntervalMs`、`crossDomain`（`enabled` / `allowedDidHosts`）、`ephemeralThreadTtlMs`（默认 1 小时）、`ephemeralSweepIntervalMs`（默认 60 秒），以及下面的 `container`。对应环境变量以 `ANP_` 开头（如 `ANP_ROOT`、`ANP_ADMIN_TOKEN`、`ANP_CROSS_DOMAIN`、`ANP_ALLOWED_DID_HOSTS`、`ANP_CONTAINER_IMAGE`），相对路径按配置文件目录解析。
 
 ### agent 定义与运行时策略
 
@@ -250,7 +250,8 @@ npm run anp:send -- --from planner --to worker --thread t1 --text "把这份目�
 
 - 工具可用性 = 定义 `tools` ∩ router 提供的工具；router 不提供的平台工具在启动时直接报错。
 - 协作工具：`anp_send` / `anp_reply` / `anp_list_messages` / `anp_get_message`、`list_agents` / `agent_status`、`memory_get` / `memory_set`、`finish_turn`。
-- v1 只做本机投递：`anp_send` / `anp_reply` 的目标必须是本机 router 托管的 agent；外部 DID 返回 `unroutable`（没有 relay），来自外部 DID 的触发消息只收不回。
+- 投递边界：本机 router 托管的 agent 永远直投，不经过 HTTP/DID 发现。默认只有本机目标可投；配置 `crossDomain.enabled=true` 且目标 DID 域名命中 `allowedDidHosts`（精确域名或 `*.example.com`）时，出站经 `@anpio-cli/service` 的 relay 转发。管理接口 `POST /admin/messages` 始终只投本机。
+- 外部入站：域名在允许清单内的外部 DID 可投递到本机 agent，并按 `conversation_id` 映射 thread；缺 `conversation_id` 的一次性 thread 在 TTL（默认 1 小时）后归档、删除对应 thread workspace 并归档 session，只有后续显式 `conversation_id` 才能复活。来自外部 DID 的触发消息会自动回复到同一 thread。
 - 定时任务：只有 `anp.allowSchedules=true` 的 agent 能用 `schedule_create` / `schedule_cancel` / `list_schedules`，只能操作自己的任务；`kind` 支持 `at`（ISO 时间）、`interval`（`60s` / `5m` / `2h` / `1d`）、`cron`（5 段）。最小间隔 60 秒，每 agent 默认最多 20 个；`catchUp` 为 `skip`（默认）/ `once` / `all`，`maxRuns` 限制总次数。触发时向指定 thread 投递 `anp.schedule.fire`，`schedule_fires(schedule_id, scheduled_at)` 唯一键保证重启与重复 tick 不重复触发。
 - 子 agent：父定义需 `anp.allowSpawn=true`；深度默认最多 2、每个父最多 3 个，工具只能从父的工具里收缩；子 agent 有独立 DID 与 `agents/<childId>/`，workspace 在父的 `workspace/subagents/` 下，TTL 到期后归档但保留 workspace。
 - 联网：`anp.network` 为 `none` / `egress` / `open`，默认 `egress` 且 allowlist 为空，即不能用 `http_fetch`。allowlist 支持 `*.example.com` 与 `host:port`；DNS 解析后拒绝回环、RFC1918 与 link-local 地址，请求超时 30 秒、响应 ≤1 MiB、最多 3 次重定向。
@@ -371,6 +372,7 @@ npm run check
 - `tests/store.test.ts`：迁移幂等、WAL 并发、`BEGIN IMMEDIATE` 争用、lease 过期与 outbox 去重；
 - `tests/anp-identity.test.ts` / `tests/anp-service.test.ts` / `tests/anp-mailbox.test.ts`：DID 文档自验、ADP 与发现索引、签名投递与 nonce 重放、游标与租约；
 - `tests/thread-session.test.ts` / `tests/router.test.ts` / `tests/router-tools.test.ts`：同 thread 多轮与恢复、两个 agent 互发、按 DID/能力路由、子 agent 收缩、写工具幂等；
+- `tests/cross-domain.test.ts`：跨域配置与域名匹配、本机优先的 relay 包装、两个服务双向投递与幂等重放、外部入站映射、一次性 thread 归档与复活、`aged_out` 汇总；
 - `tests/scheduler.test.ts`：at / interval / cron、catch-up、重复 tick 与重启不重复、取消；
 - `tests/container.test.ts`：容器内执行器的 token 校验、路径与符号链接逃逸、docker 缺失时的跳过/回退；`ANP_TEST_CONTAINER=1` 时额外验收无密钥环境变量、workspace 可写与默认无网络；
 - `tests/e2e.test.ts`：直接加载 `examples/anp/agents.json`，离线跑通两个脚本 agent 的派活与回复，以及两 agent + 定时任务的完整链路。

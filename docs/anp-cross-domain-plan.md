@@ -2,6 +2,8 @@
 
 2026-11-02。主方案见 [anp-runtime-plan.md](anp-runtime-plan.md) §3.5–§3.7。
 
+实施状态（2026-11-02）：P0–P2 与 §5 测试矩阵已完成，验收见 `tests/cross-domain.test.ts`、`tests/router.test.ts`；配置与行为说明已写回 README 与 anp-runtime-plan §3.5/§3.7。
+
 前置：anpio-cli 仓库的 `docs/service-relay-exports-plan.md` 必须先落地
 （`createRelay` / `createEgress` / `loadHttpSigner` 从包入口导出，dist 重建）。
 在那之前，P0 只能写代码和测试替身，不能做端到端验收；P1、P2 不受影响。
