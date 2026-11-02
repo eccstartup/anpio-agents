@@ -304,6 +304,8 @@ const body = {
 
 ANP 协议只有一份实现（`@anpio-cli/*`）。本仓库只做 router 侧的接入与消息生命周期，不复制协议逻辑。
 
+剩余工作的实施步骤、配置、测试与风险见 [anp-cross-domain-plan.md](anp-cross-domain-plan.md)。
+
 | 能力 | 归属 | 本仓库是否参与 |
 | --- | --- | --- |
 | 信封、JCS、Ed25519/Multibase、DID 文档签名 | `@anpio-cli/core` | 只调用 |
