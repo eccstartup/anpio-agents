@@ -13,6 +13,7 @@ import { createDidServer, type DidServerAgent, type RunningDidServer } from '../
 import { agentDescriptionFor } from '../anp/description.ts';
 import { fingerprintOfDid, type ServiceEndpoints } from '../anp/identity.ts';
 import { createAnpService, RPC_PATH, type AnpService } from '../anp/service.ts';
+import { UnroutableTargetError } from '../anp/errors.ts';
 import type { EmbeddedAgentDefinition } from '../definition.ts';
 import { normalizeDefinition } from '../standalone/config.ts';
 import type { AgentSummary, SpawnAgentToolInput } from '../tools/subagent.ts';
@@ -146,12 +147,14 @@ export class RouterRuntime {
   async send(input: AdminSendInput): Promise<RouterSendResult> {
     const from = this.hosts.get(input.from);
     if (!from) throw new Error(`agent 不存在或未启动：${input.from}`);
+    const explicit = input.to?.trim();
+    if (explicit) this.resolveTarget(explicit);
     const route = this.route({ to: input.to, threadId: input.threadId, skills: input.skills });
     if (!route) throw new Error('没有可投递的目标 agent');
     const target = this.hosts.get(route.agentId);
     if (!target) throw new Error(`路由目标未启动：${route.agentId}`);
     const threadId = input.threadId ?? `thread-${randomUUID()}`;
-    this.delivery?.wakeHost(target, threadId);
+    this.delivery?.wakeHost(target, threadId, from);
     const sent = await from.send(route.did, threadId, input.payload, input.replyTo ?? null);
     return { route, messageId: sent.messageId, queued: sent.queued, threadId };
   }
@@ -164,7 +167,7 @@ export class RouterRuntime {
     const from = this.hosts.get(fromAgentId);
     if (!from) throw new Error(`agent 不存在或未启动：${fromAgentId}`);
     const target = this.resolveTarget(input.to);
-    if (target.host) this.delivery?.wakeHost(target.host, input.threadId);
+    this.delivery?.wakeHost(target.host, input.threadId, from);
     const sent = await from.send(target.did, input.threadId, input.payload, input.replyTo ?? null);
     return {
       messageId: sent.messageId,
@@ -429,7 +432,7 @@ export class RouterRuntime {
       didBaseUrl: this.config.didBaseUrl,
       localKeys: () => this.localKeys(),
       onDelivered: event => {
-        this.delivery?.wake(event.targetDid, event.threadId);
+        this.delivery?.wake(event.targetDid, event.threadId, event.senderDid);
       },
       log: line => this.logLine(`[anp] ${line}`),
     });
@@ -657,6 +660,7 @@ export class RouterRuntime {
       log: line => this.logLine(line),
       maxActiveTurns: input.maxActiveTurns,
       sweepIntervalMs: this.config.sweepIntervalMs,
+      canDeliver: did => this.hostByDid(did) !== undefined,
       ...(input.workspaceBase ? { workspaceBase: input.workspaceBase } : {}),
       ...(injected ? { brain: injected } : {}),
       ...(brainFactory ? { brainFactory } : {}),
@@ -715,11 +719,19 @@ export class RouterRuntime {
     });
   }
 
-  private resolveTarget(to: string): { did: string; host: AgentHost | null } {
+  private hostByDid(did: string): AgentHost | undefined {
+    for (const host of this.hosts.values()) {
+      if (host.did === did) return host;
+    }
+    return undefined;
+  }
+
+  private resolveTarget(to: string): { did: string; host: AgentHost } {
     const target = to.trim();
     if (target === '') throw new Error('目标 agent 不能为空');
     if (target.startsWith('did:')) {
-      const host = [...this.hosts.values()].find(item => item.did === target) ?? null;
+      const host = this.hostByDid(target);
+      if (!host) throw new UnroutableTargetError(target);
       return { did: target, host };
     }
     const agentId = target.startsWith('agent:') ? target.slice('agent:'.length) : target;

@@ -34,16 +34,18 @@ export class Delivery {
   }
 
   /** 为 thread 建索引并唤醒 agent；重复调用幂等。 */
-  wake(targetDid: string, threadId: string): AgentHost | undefined {
+  wake(targetDid: string, threadId: string, senderDid?: string | null): AgentHost | undefined {
     const host = this.findByDid(targetDid);
     if (!host) {
       this.log(`收到发往 ${targetDid} 的投递，但本 router 没有该 agent`);
       return undefined;
     }
-    return this.wakeHost(host, threadId);
+    const sender = senderDid ? this.findByDid(senderDid) : undefined;
+    return this.wakeHost(host, threadId, sender);
   }
 
-  wakeHost(host: AgentHost, threadId: string): AgentHost {
+  /** 目标与（本机）发送方都记入 thread_members，再叫醒目标。 */
+  wakeHost(host: AgentHost, threadId: string, sender?: AgentHost): AgentHost {
     this.router.ensureThread({ threadId, ownerAgentId: host.agentId });
     this.router.ensureSession({
       sessionId: `sess-${randomUUID()}`,
@@ -51,7 +53,12 @@ export class Delivery {
       threadId,
       state: 'idle',
     });
-    this.router.addMember(threadId, host.agentId);
+    this.router.ensureMembers(
+      threadId,
+      sender && sender.agentId !== host.agentId
+        ? [host.agentId, sender.agentId]
+        : [host.agentId],
+    );
     host.wake();
     return host;
   }

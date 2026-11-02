@@ -12,6 +12,7 @@ import type { AgentStore, InboxRow } from '../../store/agent-store.ts';
 import { nowIso } from '../../store/sqlite.ts';
 import type { AnpClient, AnpPayload, SendResult } from '../../anp/client.ts';
 import { AnpRpcError } from '../../anp/client.ts';
+import { UnroutableTargetError } from '../../anp/errors.ts';
 
 const CURSOR_KEY = 'last_seq';
 const BACKOFF_SECONDS = [1, 5, 30, 300, 1_800];
@@ -32,6 +33,9 @@ export type AnpMailboxOptions = {
   /** 这个 Session 绑定的 thread；pull 只返回该 thread 的待处理消息。 */
   threadId: string;
   now?: () => number;
+  /** 目标 DID 是否由本 router 托管；缺省视为可投递（独立信箱测试）。 */
+  canDeliver?: (did: string) => boolean;
+  log?: (line: string) => void;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -95,6 +99,8 @@ export class AnpMailbox implements MailboxPort {
   private readonly client: AnpClient;
   private readonly threadId: string;
   private readonly now: () => number;
+  private readonly canDeliver: (did: string) => boolean;
+  private readonly log: (line: string) => void;
   private readonly sessions = new Map<string, OpenSession>();
   private readonly leases = new Map<string, Set<string>>();
 
@@ -103,6 +109,8 @@ export class AnpMailbox implements MailboxPort {
     this.client = options.client;
     this.threadId = options.threadId;
     this.now = options.now ?? Date.now;
+    this.canDeliver = options.canDeliver ?? (() => true);
+    this.log = options.log ?? (() => undefined);
   }
 
   /** 把 service 上还没搬过的投递拉进本地 inbox，按 message_id 去重。 */
@@ -131,6 +139,9 @@ export class AnpMailbox implements MailboxPort {
         });
         if (inserted) added += 1;
       }
+      if (result.agedOut > 0) {
+        this.log(`sync.delta 有 ${result.agedOut} 条投递已超出保留窗口，无法再拉取`);
+      }
       const next = result.nextSince;
       this.store.setCursor(CURSOR_KEY, next);
       hasMore = result.hasMore;
@@ -150,6 +161,7 @@ export class AnpMailbox implements MailboxPort {
     payload: AnpPayload;
     replyTo?: string | null;
   }): Promise<SendResult & { queued: boolean }> {
+    if (!this.canDeliver(input.targetDid)) throw new UnroutableTargetError(input.targetDid);
     const threadId = input.threadId ?? this.threadId;
     const messageId = `anp-${randomUUID()}`;
     const body = {
@@ -194,6 +206,13 @@ export class AnpMailbox implements MailboxPort {
     const due = this.store.dueOutbox(this.now());
     for (const row of due) {
       if (only && !only.includes(row.message_id)) continue;
+      if (!this.canDeliver(row.target_did)) {
+        const error = new UnroutableTargetError(row.target_did);
+        this.store.retireOutbox(row.message_id, error.message);
+        this.log(`出站 ${row.message_id} 已终止重试：${error.message}`);
+        failed += 1;
+        continue;
+      }
       try {
         const body = asRecord(JSON.parse(row.body_json));
         const payload = asRecord(body.payload);

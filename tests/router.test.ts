@@ -135,6 +135,12 @@ test('Router：两个 agent 在一个进程内按 DID 与能力路由，崩溃�
       assert.equal(JSON.parse(plannerOut[0]!.body_json).payload.text, '整理目录');
       assert.equal(router.store.listTurns('worker', 'thread-a')[0]?.status, 'succeeded');
 
+      // 本地投递双方都在 thread_members 里，后续 thread 消息才能过收件规则。
+      assert.deepEqual(
+        router.store.listMembers('thread-a').map(row => row.agent_id).sort(),
+        ['planner', 'worker'],
+      );
+
       // 2) 能力路由。
       const bySkill = router.route({ skills: ['整理'] });
       assert.equal(bySkill?.agentId, 'worker');
@@ -151,6 +157,41 @@ test('Router：两个 agent 在一个进程内按 DID 与能力路由，崩溃�
       const explicitAgent = router.route({ to: 'agent:planner', threadId: 'thread-a' });
       assert.equal(explicitAgent?.agentId, 'planner');
       assert.equal(explicitAgent?.reason, 'explicit');
+    },
+  );
+});
+
+test('Router：没有 relay 时拒绝本机之外的出站 DID', async () => {
+  const external = 'did:wba:external.example:agents:someone:e1_abc';
+  await withRouter(
+    [agent('planner', ['规划'])],
+    {
+      planner: new ScriptedBrain([{ tool: 'finish', input: { summary: 'ok' } }]),
+    },
+    async router => {
+      await assert.rejects(
+        () => router.send({
+          from: 'planner',
+          to: external,
+          threadId: 'thread-external',
+          payload: { type: 'anp.task.request', text: '外面的人' },
+        }),
+        /不在本机 router 中/,
+      );
+      await assert.rejects(
+        () => router.sendFrom('planner', {
+          to: external,
+          threadId: 'thread-external',
+          payload: { type: 'anp.chat.message', text: '外面的人' },
+        }),
+        /不在本机 router 中/,
+      );
+
+      const host = router.getAgent('planner')!;
+      const outbox = host.dataStore.db.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM outbox',
+      );
+      assert.equal(outbox?.count, 0, '被拒绝的目标不能进入 outbox');
     },
   );
 });

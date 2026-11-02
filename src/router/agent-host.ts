@@ -42,6 +42,8 @@ export type AgentHostOptions = {
   now?: () => number;
   /** 子 agent 把 workspace 放在父的 workspace/subagents 下。 */
   workspaceBase?: string;
+  /** 目标 DID 是否由本 router 托管；v1 没有 relay 时用于拒绝跨域出站。 */
+  canDeliver?: (did: string) => boolean;
   toolFactory?: (input: {
     runDir: string;
     turnId: string;
@@ -341,6 +343,8 @@ export class AgentHost {
       client: this.client!,
       threadId,
       now: this.now,
+      ...(this.options.canDeliver ? { canDeliver: this.options.canDeliver } : {}),
+      log: line => this.log(`[${this.agentId}] ${line}`),
     });
     this.mailboxes.set(threadId, mailbox);
     return mailbox;
@@ -407,6 +411,8 @@ export class AgentHost {
       runId,
       threadId,
       triggerMessageId: trigger?.message_id ?? null,
+      ...(this.options.canDeliver ? { canDeliver: this.options.canDeliver } : {}),
+      log: (level, text) => this.log(`[${this.agentId}] ${level}: ${text}`),
       ...(toolFactory
         ? {
             toolFactory: toolInput => toolFactory({

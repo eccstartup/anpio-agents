@@ -516,6 +516,17 @@ export class AgentStore {
     );
   }
 
+  /** 目标不在本机且 v1 无 relay：不再重试，保留行用于排查。 */
+  retireOutbox(messageId: string, reason: string): void {
+    this.db.run(
+      `UPDATE outbox SET next_attempt_at = ?, service_json = ?
+       WHERE message_id = ? AND sent_at IS NULL`,
+      Number.MAX_SAFE_INTEGER,
+      JSON.stringify({ error: reason, anp_code: 'unroutable' }),
+      messageId,
+    );
+  }
+
   dueOutbox(now = Date.now(), limit = 20): OutboxRow[] {
     return this.db.all<OutboxRow>(
       `SELECT * FROM outbox WHERE sent_at IS NULL AND next_attempt_at <= ?

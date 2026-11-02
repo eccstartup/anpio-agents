@@ -252,7 +252,7 @@ const answer = await handleRpc({
 
 这样没有回环跳转，也没有 `@target-uri` / `@authority` 不匹配的问题。
 
-- **不配置 relay**：`relayFor` 对非 relay 方法直接返回 LOCAL，所以 `direct.send` 无论目标 DID 在哪都会被本地收下。因此 router 的出站工具必须**先校验目标是本机注册表里的 agent**，否则拒绝（`unroutable`）。跨域投递不在 v1 范围内，后续接 `createRelay` + egress 时再放开。
+- **不配置 relay**：`relayFor` 对非 relay 方法直接返回 LOCAL，所以 `direct.send` 无论目标 DID 在哪都会被本地收下。因此 router 的出站工具必须**先校验目标是本机注册表里的 agent**，否则拒绝（`unroutable`）。跨域投递不在 v1 范围内，后续接 `createRelay` + egress 时再放开。实现与剩余项见 §3.7。
 - 外部调用方仍然正常访问 `publicUrl + /anp-im/rpc`；服务从 `meta.sender_did` 解析对方 DID 文档，受 `didResolution.allowedHosts` 与私网限制约束。
 
 ### 3.5 消息与 thread 映射
@@ -275,7 +275,7 @@ const body = {
 
 - `direct.send` 不检查未知字段，`incomingParams` 又原样保留 `body`，所以 `conversation_id` / `reply_to` 能完整到达收件人。
 - `direct.send` 的 payload 规则：`application/json` 必须是 `payload` 对象；纯文本用 `text` + `text/plain`。任务消息统一用 JSON。
-- thread 由 `body.conversation_id` 决定；缺省用 `message_id` 建一次性 thread（1 小时后归档，不进长期工作区）。
+- thread 由 `body.conversation_id` 决定；缺省用 `message_id` 建一次性 thread（1 小时后归档，不进长期工作区；归档扫描待实现，见 §3.7）。
 - 收件规则：显式 `meta.target.did` 只投给该 agent；thread 消息需要 `thread_members` 里已有双方，否则 router 先补成员再投。
 - 出站：`anp_send` 写 `outbox`，再构造 `buildMessageRequest({ id, method: 'direct.send', meta, body, auth })`；`auth` 由 `buildOriginProofAuth(signOriginProof({ method, meta, body, signer: ed25519OriginProofSigner(priv, keyid) }))` 生成。投递成功后标 `sent_at`；失败按 1s/5s/30s/5m/30m 退避。
 - 回复：模型可显式调 `anp_reply`；没有调用但循环自然结束时，把最后一段 assistant 文本作为 `anp.chat.message` 回复到触发 thread（与 `completion: 'text'` 对齐）。
@@ -299,6 +299,36 @@ const body = {
 - 超预算时保留第一条任务消息 + 最近 60 条 / 256 KiB，旧消息折叠成一行「省略 N 条较早消息」；不做自动模型摘要。
 
 这正是「agent 的个人行为不记录历史，agent 的交互通过 ANP 消息记录」。
+
+### 3.7 职责边界与本仓库的 ANP 工作清单
+
+ANP 协议只有一份实现（`@anpio-cli/*`）。本仓库只做 router 侧的接入与消息生命周期，不复制协议逻辑。
+
+| 能力 | 归属 | 本仓库是否参与 |
+| --- | --- | --- |
+| 信封、JCS、Ed25519/Multibase、DID 文档签名 | `@anpio-cli/core` | 只调用 |
+| origin proof 校验、nonce、幂等、`direct.send` / `sync.delta` 落库与 dispatch | `@anpio-cli/service` | 只调用 `handleRpc` |
+| 跨域 relay / 出站转发 | `@anpio-cli/service` 的 `createRelay` + `createDispatch({ relay })` | v1 不接，见下 |
+| 本机注册表与出站目标校验 | 本仓库 | 是 |
+| thread ↔ session ↔ workspace 映射、成员 | 本仓库 | 是 |
+| 本地 inbox/outbox、游标、ack/nack、租约 | 本仓库 | 是 |
+| 投递后的唤醒、自动回复规则 | 本仓库 | 是 |
+| 历史构造、工具幂等、审计 | 本仓库 | 是 |
+
+v1 的硬边界：**没有 relay 时 `direct.send` 会被本机服务无条件收下**，所以所有出站路径必须先判断目标 DID 是否在本机。当前实现：
+
+- `RouterRuntime.send` / `sendFrom` 对显式目标先 `resolveTarget`；本机没有的 DID 抛 `UnroutableTargetError`（code `unroutable`），不再落到 capability / 默认 agent。
+- `AnpMailbox.send` 在写 outbox 前再校验一次，覆盖 `anp_reply`、自动回复等直接调用；`flushOutbox` 会把升级前遗留的跨域行退休（不再重试），避免“发送成功但永远到不了”。
+- 触发消息来自外部 DID 时，自动回复跳过并记一条 warn；显式 `anp_reply` / `anp_send` 会把 `unroutable` 作为工具错误返回给模型。
+- 本机投递在唤醒目标前把发送方与目标都写入 `thread_members`。
+- `sync.delta` 返回 `aged_out > 0` 时写日志，提示已超出 30 天保留窗口的投递无法再拉取。
+
+剩余工作（都属于本仓库，等需要时再做）：
+
+- [ ] 缺 `conversation_id` 的一次性 thread：当前按 `message_id` 建 thread，但还没有 1 小时归档扫描；需要给 thread 加 `ephemeral` 状态与清理 tick，并避免为这类 thread 创建长期 workspace。
+- [ ] `aged_out` 目前只写日志；若要进 `/health` 或告警，需要在 mailbox 上暴露最近一次计数。
+- [ ] 跨域出站：等 `@anpio-cli/service` 的 relay 可用后，在 `createDispatch` 注入 `relay`，并让 `resolveTarget` 对外部 DID 放行；本仓库不实现转发协议。
+- [ ] 跨域入站的自动回复：relay 可用前保持“只收不回”，避免把回复投给本机服务。
 
 ## 4. 长期存活的 Session 与 Turn
 
@@ -468,7 +498,7 @@ docker run --rm -d \
 
 建议顺序：P0 → P1 → P2 → P3 是「单 agent 长期存活 + ANP 交互」的最小闭环；P4 起进入多 agent；P7/P8 可按需要提前。
 
-实施状态（2026-11-02）：P0–P9 已实现，示例与离线端到端见 `examples/anp/` 与 `tests/e2e.test.ts`。与本文的两处实现差异：`anp.isolation=process` 目前仍在 router 进程内执行（保留值，尚未拆每 turn 子进程），真正隔离请用 `container`；容器按 turn 创建并在 turn 结束删除，而不是整个 session 复用一个。
+实施状态（2026-11-02）：P0–P9 已实现，示例与离线端到端见 `examples/anp/` 与 `tests/e2e.test.ts`。与本文的两处实现差异：`anp.isolation=process` 目前仍在 router 进程内执行（保留值，尚未拆每 turn 子进程），真正隔离请用 `container`；容器按 turn 创建并在 turn 结束删除，而不是整个 session 复用一个。ANP 通信侧已完成本机出站目标校验、双方 `thread_members` 与 `aged_out` 观测；一次性 thread 归档与跨域 relay 仍未实现，见 §3.7。
 
 ## 9. 文件边界
 

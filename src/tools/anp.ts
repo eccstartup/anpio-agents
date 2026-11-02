@@ -86,7 +86,7 @@ export const ANP_TOOL_SPECS = {
   anp_send: {
     name: 'anp_send',
     description:
-      '向本机 agent 或外部 DID 发一条 ANP 消息。to 可以写 agent id、agent:<id> 或完整 DID；默认发在当前 thread。',
+      '向本机 router 托管的 agent 发一条 ANP 消息。to 可以写 agent id、agent:<id> 或它的完整 DID；默认发在当前 thread。v1 未启用跨域 relay，外部 DID 会被拒绝。',
     parameters: schema({
       to: { type: 'string', description: '目标 agent id、agent:<id> 或 did:...' },
       text: { type: 'string', description: '消息正文' },

@@ -256,3 +256,93 @@ test('ANP Turn：同一个 thread 多轮复用 workspace，重启后继续，历
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('ANP Turn：触发消息来自外部 DID 时，没有 relay 就跳过自动回复而不是把消息发回本机服务', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'anp-turn-external-'));
+  const alice = await loadOrCreateIdentity(join(dir, 'alice'), endpoints, 'alice');
+  const bob = await loadOrCreateIdentity(join(dir, 'bob'), endpoints, 'bob');
+  const keys = new Map([
+    [alice.did, multibaseOf(alice)],
+    [bob.did, multibaseOf(bob)],
+  ]);
+  const service = createAnpService({
+    directory: join(dir, 'anp'),
+    listen: { host: '127.0.0.1', port: 0 },
+    publicUrl: endpoints.publicUrl,
+    didBaseUrl: endpoints.didBaseUrl,
+    localKeys: () => keys,
+    log: () => {},
+  });
+  const aliceStore = new AgentStore(join(dir, 'alice-store', 'agent.db'));
+  const bobStore = new AgentStore(join(dir, 'bob', 'agent.db'));
+  const router = new RouterStore(join(dir, 'router.db'));
+  const threadId = 'thread-external';
+  const sessionId = 'sess-external';
+  try {
+    const aliceBox = new AnpMailbox({
+      store: aliceStore,
+      client: new AnpClient({ identity: alice, call: service.call }),
+      threadId,
+    });
+    const bobBox = new AnpMailbox({
+      store: bobStore,
+      client: new AnpClient({ identity: bob, call: service.call }),
+      threadId,
+      canDeliver: did => did === bob.did,
+    });
+    const request = await aliceBox.send({
+      targetDid: bob.did,
+      payload: { type: 'anp.task.request', task_id: 'task-ext', text: '外部派活' },
+    });
+
+    router.ensureThread({ threadId, ownerAgentId: 'bob' });
+    router.ensureSession({ sessionId, agentId: 'bob', threadId, state: 'idle' });
+    assert.equal(router.claimSession(sessionId, 'turn-ext'), true);
+    const logs: string[] = [];
+    const runtime = await AgentRuntime.create({
+      agentId: 'bob',
+      definition: definition('bob', ['finish']),
+      transport: transport(),
+      rootBase: join(dir, 'agents'),
+      brain: new ScriptedBrain([{ tool: 'finish', input: { summary: '收到', outcome: 'done' } }]),
+    });
+    const result = await new AnpTurnSession({
+      runtime,
+      store: bobStore,
+      mailbox: bobBox,
+      ledger: new AnpTurnLedger({
+        router,
+        store: bobStore,
+        sessionId,
+        turnId: 'turn-ext',
+        agentId: 'bob',
+        threadId,
+        runId: 'run-ext',
+      }),
+      session: router.getSession(sessionId)!,
+      turnId: 'turn-ext',
+      runId: 'run-ext',
+      threadId,
+      triggerMessageId: request.messageId,
+      canDeliver: did => did === bob.did,
+      log: (level, text) => logs.push(`${level}: ${text}`),
+    }).run();
+    router.releaseSession(sessionId);
+
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.summary, '收到');
+    assert.equal(bobStore.pendingInboxCount(threadId), 0, '消息仍应被 ack');
+    assert.equal(
+      bobStore.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM outbox')?.count,
+      0,
+      '不能把外部回复塞进本机服务的 outbox',
+    );
+    assert.equal(logs.some(line => line.includes('外部 DID')), true);
+  } finally {
+    aliceStore.close();
+    bobStore.close();
+    router.close();
+    await service.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

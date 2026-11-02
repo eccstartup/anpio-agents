@@ -250,6 +250,7 @@ npm run anp:send -- --from planner --to worker --thread t1 --text "把这份目�
 
 - 工具可用性 = 定义 `tools` ∩ router 提供的工具；router 不提供的平台工具在启动时直接报错。
 - 协作工具：`anp_send` / `anp_reply` / `anp_list_messages` / `anp_get_message`、`list_agents` / `agent_status`、`memory_get` / `memory_set`、`finish_turn`。
+- v1 只做本机投递：`anp_send` / `anp_reply` 的目标必须是本机 router 托管的 agent；外部 DID 返回 `unroutable`（没有 relay），来自外部 DID 的触发消息只收不回。
 - 定时任务：只有 `anp.allowSchedules=true` 的 agent 能用 `schedule_create` / `schedule_cancel` / `list_schedules`，只能操作自己的任务；`kind` 支持 `at`（ISO 时间）、`interval`（`60s` / `5m` / `2h` / `1d`）、`cron`（5 段）。最小间隔 60 秒，每 agent 默认最多 20 个；`catchUp` 为 `skip`（默认）/ `once` / `all`，`maxRuns` 限制总次数。触发时向指定 thread 投递 `anp.schedule.fire`，`schedule_fires(schedule_id, scheduled_at)` 唯一键保证重启与重复 tick 不重复触发。
 - 子 agent：父定义需 `anp.allowSpawn=true`；深度默认最多 2、每个父最多 3 个，工具只能从父的工具里收缩；子 agent 有独立 DID 与 `agents/<childId>/`，workspace 在父的 `workspace/subagents/` 下，TTL 到期后归档但保留 workspace。
 - 联网：`anp.network` 为 `none` / `egress` / `open`，默认 `egress` 且 allowlist 为空，即不能用 `http_fetch`。allowlist 支持 `*.example.com` 与 `host:port`；DNS 解析后拒绝回环、RFC1918 与 link-local 地址，请求超时 30 秒、响应 ≤1 MiB、最多 3 次重定向。

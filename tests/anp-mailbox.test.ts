@@ -101,6 +101,58 @@ test('ANP 信箱：发送、同步、拉取、确认与去重', async () => {
   }
 });
 
+test('ANP 信箱：没有 relay 时拒绝外部 DID，已排队的旧出站不再重试', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'anp-mailbox-'));
+  const alice = await loadOrCreateIdentity(join(dir, 'alice'), endpoints, 'alice');
+  const store = new AgentStore(join(dir, 'alice', 'agent.db'));
+  const external = 'did:wba:external.example:agents:someone:e1_abc';
+  try {
+    const box = new AnpMailbox({
+      store,
+      client: new AnpClient({
+        identity: alice,
+        call: async () => {
+          throw new Error('不应该调用本机服务');
+        },
+      }),
+      threadId: 'thread-external',
+      canDeliver: () => false,
+    });
+
+    await assert.rejects(
+      () => box.send({
+        targetDid: external,
+        payload: { type: 'anp.chat.message', text: '外面的人' },
+      }),
+      /不在本机 router 中/,
+    );
+    assert.equal(
+      store.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM outbox')?.count,
+      0,
+      '被拒绝的目标不能进入 outbox',
+    );
+
+    // 升级前已经排队的跨域出站：退休而不是投递给本机服务。
+    store.queueOutbox({
+      messageId: 'anp-old',
+      threadId: 'thread-external',
+      targetDid: external,
+      contentType: 'application/json',
+      body: { payload: { type: 'anp.chat.message', text: '旧消息' } },
+    });
+    const flushed = await box.flushOutbox();
+    assert.equal(flushed.failed, 1);
+    const row = store.getOutbox('anp-old');
+    assert.equal(row?.sent_at, null);
+    assert.ok((row?.next_attempt_at ?? 0) > Date.now());
+    assert.equal(store.dueOutbox(Date.now()).some(item => item.message_id === 'anp-old'), false);
+    assert.match(String(row?.service_json), /unroutable/);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('ANP 信箱：nack 延迟重投；离线时出站排队并退避', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'anp-mailbox-'));
   const alice = await loadOrCreateIdentity(join(dir, 'alice'), endpoints, 'alice');

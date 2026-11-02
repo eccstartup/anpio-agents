@@ -34,6 +34,9 @@ export type AnpTurnSessionOptions = {
   threadId: string;
   triggerMessageId?: string | null;
   maxMessages?: number;
+  /** 目标 DID 是否由本 router 托管；缺省视为可投递。 */
+  canDeliver?: (did: string) => boolean;
+  log?: (level: 'info' | 'warn', text: string) => void;
   /** 后续阶段注入 ANP/子 agent/联网工具；缺省只用本地原语。 */
   toolFactory?: (input: {
     runDir: string;
@@ -62,6 +65,8 @@ export class AnpTurnSession implements SessionTask {
   private readonly maxMessages: number;
   private readonly toolFactory: AnpTurnSessionOptions['toolFactory'];
   private readonly triggerMessageId: string | null;
+  private readonly canDeliver: (did: string) => boolean;
+  private readonly log: (level: 'info' | 'warn', text: string) => void;
   private readonly deadline = new AbortController();
 
   private timer: NodeJS.Timeout | null = null;
@@ -87,6 +92,8 @@ export class AnpTurnSession implements SessionTask {
     this.maxMessages = options.maxMessages ?? MAX_MESSAGES;
     this.toolFactory = options.toolFactory;
     this.triggerMessageId = options.triggerMessageId ?? null;
+    this.canDeliver = options.canDeliver ?? (() => true);
+    this.log = options.log ?? (() => undefined);
   }
 
   abort(reason: string): void {
@@ -320,6 +327,10 @@ export class AnpTurnSession implements SessionTask {
       !trigger.ref.taskId
       && (trigger.kind === 'anp.chat.message' || trigger.kind === 'anp.schedule.fire')
     ) return;
+    if (!this.canDeliver(targetDid)) {
+      this.log('warn', `触发消息来自外部 DID ${targetDid}，v1 未启用跨域 relay，跳过自动回复`);
+      return;
+    }
     try {
       await this.mailbox.send({
         targetDid,
