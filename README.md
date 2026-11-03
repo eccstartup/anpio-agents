@@ -48,6 +48,79 @@ cd anpio-agents
 npm install
 ```
 
+## 交互式智能体：`anpio-agents`
+
+`anpio-agents` 是一个像 Claude Code / codex CLI 一样的常驻终端智能体：逐字流式输出、直接调用本地工具，同时可以订阅平台消息；本地对话与平台任务共用同一套 thread 模型。
+
+```bash
+# 仓库内直接运行
+npm run agents -- --agent examples/local-demo.json
+
+# 或 npm link 之后作为命令使用
+npm link
+anpio-agents --agent examples/local-chat.json
+```
+
+启动时必须指定定义文件（`--agent <file>`）。常用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--agent <file>` | 定义文件；必填 |
+| `--message <text>` | 只跑一条消息，完成后退出 |
+| `--thread <id>` | 指定 thread；缺省 `local:main` |
+| `--root <dir>` | 运行根目录（默认 `./agent-runs`） |
+| `--no-stream` | 关掉逐字流式，等整段回答 |
+| `--no-platform` | 即使配置里有平台来源也不连接 |
+| `--allow-missing-tools` | 没有平台后端时降级为本地工具 |
+
+REPL 内命令：`/new` 开一个新 thread、`/status` 看当前线程与来源、`/exit`（或 `/quit`、Ctrl-D）退出；Ctrl-C 中止当前 thread 的这一轮，空闲时连按两次退出。
+
+### 线程模型
+
+消息来源（stdin、平台、以后的 IM / HTTP / 定时抓取）只负责拉消息、确认消息、送回复；`ThreadHost` 把它们并进同一个 SQLite 存储，按 thread 路由：
+
+- 同一 thread 的后续消息带历史继续做；没有 thread 标识的消息按来源各自新建任务。
+- 同一 thread 同时只跑一轮；不同 thread 并行，受定义里的 `concurrency` 限制，交互来源优先占槽位。
+- 工作目录在 `<root>/<agentId>/workspace/threads/<threadId>`，跨 turn 保留。
+- 一轮只有拿到结束信号才 ack；失败或中断会 nack，消息退回来源与本地队列。
+- 定义文件本身不会同步到平台；只有平台相关任务的产物通过平台工具发送。
+
+### 来源配置
+
+来源写在定义文件的 `sources` 字段（只存在本地，不会进入平台）：
+
+```json
+{
+  "sources": {
+    "stdin": { "enabled": true },
+    "platform": {
+      "enabled": true,
+      "baseUrl": "http://127.0.0.1:8787",
+      "agentId": "worker-1",
+      "adminTokenEnv": "COLLAB_RUNTIME_TOKEN",
+      "secretEnv": "COLLAB_EMBEDDED_SECRET",
+      "pollMs": 3000
+    }
+  }
+}
+```
+
+- 只接受环境变量名；`adminToken` / `secret` 这类明文字段会直接报错。
+- 平台来源用管理员令牌 `ensure` agent，再用 `deriveEmbeddedToken` 得到的派生令牌打开长期信箱会话；会话过期会自动重建，本地 `message_id` 去重保证不丢不重。
+- 平台来源不调用 `embedded/agents/import`，也不创建 platform run；任务动作仍由平台工具完成。
+- 同一个平台 agent 不要同时跑 `supervisor` 和 `anpio-agents`，否则两边会抢消息。
+
+```bash
+ANTHROPIC_API_KEY=... npm run agents -- --agent examples/local-chat.json
+
+COLLAB_RUNTIME_TOKEN=... COLLAB_EMBEDDED_SECRET=... \
+  ANTHROPIC_API_KEY=... npm run agents -- --agent examples/local-chat.json
+```
+
+`completion` 在聊天 CLI 里缺省为 `text`：模型给出文本回答即收尾。退出码：`0` 成功、`2` 结果未知、其他失败。
+
+设计细节见 [docs/thread-agent-plan.md](docs/thread-agent-plan.md)。
+
 ## 运行 supervisor
 
 ```bash

@@ -24,6 +24,8 @@ export type BrainRequest = {
   tools: ToolSpec[];
   maxTokens: number;
   signal?: AbortSignal;
+  /** 设置时适配器优先走 SSE，并逐段回调；不设置时保持整段 JSON。 */
+  onTextDelta?: (delta: string) => void;
 };
 
 export type BrainUsage = { promptTokens?: number; completionTokens?: number };

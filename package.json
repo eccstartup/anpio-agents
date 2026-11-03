@@ -15,7 +15,8 @@
     "router": "node --disable-warning=ExperimentalWarning src/router/main.ts",
     "anp:send": "node --disable-warning=ExperimentalWarning src/anp/send-cli.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "agents": "node --disable-warning=ExperimentalWarning src/chat/cli.ts"
   },
   "dependencies": {
     "@anpio-cli/core": "file:../anpio-cli/packages/core",
@@ -27,5 +28,8 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "typescript": "^5.9.3"
+  },
+  "bin": {
+    "anpio-agents": "bin/anpio-agents.mjs"
   }
 }

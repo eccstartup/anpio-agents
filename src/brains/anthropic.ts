@@ -7,7 +7,6 @@
 
 import {
   joinUrl,
-  postJson,
   type Brain,
   type BrainConfig,
   type BrainRequest,
@@ -15,6 +14,7 @@ import {
   type FetchLike,
   type ToolCall,
 } from './types.ts';
+import { openModelResponse, parseJson, readSse } from './stream.ts';
 
 type Row = Record<string, unknown>;
 
@@ -67,14 +67,20 @@ export function anthropicBrain(config: BrainConfig, fetchImpl: FetchLike): Brain
       }
       const headers: Record<string, string> = { 'anthropic-version': '2023-06-01' };
       if (config.apiKey) headers['x-api-key'] = config.apiKey;
+      if (request.onTextDelta) body.stream = true;
 
-      const parsed = await postJson(
+      const opened = await openModelResponse(
         fetchImpl,
         joinUrl(config.baseUrl, '/v1/messages'),
         headers,
         body,
         request.signal,
+        request.onTextDelta !== undefined,
       );
+      if (opened.streaming) {
+        return await readAnthropicStream(opened.response, request.onTextDelta);
+      }
+      const parsed = opened.parsed!;
       const texts: string[] = [];
       const toolCalls: ToolCall[] = [];
       for (const item of Array.isArray(parsed.content) ? parsed.content : []) {
@@ -102,4 +108,80 @@ export function anthropicBrain(config: BrainConfig, fetchImpl: FetchLike): Brain
       };
     },
   };
+}
+
+type StreamTool = { id: string; name: string; json: string; initial: Row | null };
+
+async function readAnthropicStream(
+  response: Response,
+  onTextDelta?: (delta: string) => void,
+): Promise<BrainResponse> {
+  let text = '';
+  let promptTokens: number | undefined;
+  let completionTokens: number | undefined;
+  let stopReason = '';
+  const tools = new Map<number, StreamTool>();
+
+  await readSse(response, sse => {
+    const data = parseJson(sse.data);
+    const type = typeof data.type === 'string' ? data.type : sse.event;
+    if (type === 'message_start') {
+      const usage = asRow(asRow(data.message).usage);
+      if (typeof usage.input_tokens === 'number') promptTokens = usage.input_tokens;
+      return;
+    }
+    if (type === 'content_block_start') {
+      const block = asRow(data.content_block);
+      const index = typeof data.index === 'number' ? data.index : tools.size;
+      if (block.type === 'tool_use') {
+        tools.set(index, {
+          id: typeof block.id === 'string' ? block.id : `call_${index}`,
+          name: typeof block.name === 'string' ? block.name : '',
+          json: '',
+          initial: asRow(block.input),
+        });
+      }
+      return;
+    }
+    if (type === 'content_block_delta') {
+      const delta = asRow(data.delta);
+      if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+        text += delta.text;
+        onTextDelta?.(delta.text);
+      } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+        const tool = tools.get(typeof data.index === 'number' ? data.index : -1);
+        if (tool) tool.json += delta.partial_json;
+      }
+      return;
+    }
+    if (type === 'message_delta') {
+      const delta = asRow(data.delta);
+      if (typeof delta.stop_reason === 'string') stopReason = delta.stop_reason;
+      const usage = asRow(data.usage);
+      if (typeof usage.output_tokens === 'number') completionTokens = usage.output_tokens;
+      return;
+    }
+    if (type === 'error') {
+      throw new Error(`模型流返回错误：${JSON.stringify(data.error ?? data).slice(0, 500)}`);
+    }
+  });
+
+  const toolCalls: ToolCall[] = [...tools.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, tool]) => ({
+      id: tool.id,
+      name: tool.name,
+      input: tool.json ? parseJson(tool.json) : (tool.initial ?? {}),
+    }));
+
+  return {
+    ...(text ? { text } : {}),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    usage: { promptTokens, completionTokens },
+    stopReason,
+  };
+}
+
+function asRow(value: unknown): Row {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Row) : {};
 }

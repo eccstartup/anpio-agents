@@ -18,6 +18,12 @@ export type BrainLoopTools = {
   dispose?(): Promise<void>;
 };
 
+export type BrainLoopEvent =
+  | { type: 'text-delta'; text: string }
+  | { type: 'assistant-text'; text: string }
+  | { type: 'tool-call'; name: string; input: Record<string, unknown> }
+  | { type: 'tool-result'; name: string; content: string; uncertain?: string };
+
 export type BrainLoopOptions = {
   brain: Brain;
   tools: BrainLoopTools;
@@ -32,6 +38,10 @@ export type BrainLoopOptions = {
   heartbeat?: () => Promise<void>;
   /** 每次真正执行工具前调用；供调用方记录「这一轮动过手」。 */
   onToolExecuted?: () => void;
+  /** 逐字流式输出；需要同时提供 onEvent。 */
+  stream?: boolean;
+  /** 运行事件的细粒度观察口；不影响日志与结果。 */
+  onEvent?: (event: BrainLoopEvent) => void;
 };
 
 export type BrainLoopResult = {
@@ -75,10 +85,16 @@ export async function runBrainLoop(options: BrainLoopOptions): Promise<BrainLoop
       tools: tools.specs,
       maxTokens: options.maxTokens,
       signal,
+      ...(options.stream && options.onEvent
+        ? { onTextDelta: (delta: string) => options.onEvent!({ type: 'text-delta', text: delta }) }
+        : {}),
     });
     outcome.promptTokens += response.usage?.promptTokens ?? 0;
     outcome.completionTokens += response.usage?.completionTokens ?? 0;
-    if (response.text) log('info', `模型：${response.text.slice(0, 500)}`);
+    if (response.text) {
+      log('info', `模型：${response.text.slice(0, 500)}`);
+      options.onEvent?.({ type: 'assistant-text', text: response.text });
+    }
 
     if (!response.toolCalls || response.toolCalls.length === 0) {
       if (response.text) messages.push({ role: 'assistant', content: response.text });
@@ -104,9 +120,16 @@ export async function runBrainLoop(options: BrainLoopOptions): Promise<BrainLoop
     let stopped = false;
     for (const call of calls) {
       log('info', `调用工具 ${call.name}：${JSON.stringify(call.input).slice(0, 300)}`);
+      options.onEvent?.({ type: 'tool-call', name: call.name, input: call.input });
       outcome.toolExecuted = true;
       options.onToolExecuted?.();
       const execution = await tools.execute(call);
+      options.onEvent?.({
+        type: 'tool-result',
+        name: call.name,
+        content: execution.content,
+        ...(execution.uncertain ? { uncertain: execution.uncertain } : {}),
+      });
       messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: execution.content });
       if (execution.uncertain) {
         outcome.status = 'outcome_unknown';

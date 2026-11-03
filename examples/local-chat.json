@@ -1,0 +1,17 @@
+{
+  "id": "local-chat",
+  "name": "本地对话",
+  "description": "像终端智能体一样工作：逐字输出，读写当前 thread 的工作目录，并能连接平台订阅任务。",
+  "provider": {
+    "protocol": "anthropic-messages",
+    "model": "claude-sonnet-5-5"
+  },
+  "systemPrompt": "你是一个可以直接动手的终端智能体。先看清当前目录与已有文件，再决定怎么做；结论要写清做了什么、产出在哪、怎么验证。",
+  "tools": ["shell", "read_file", "write_file", "list_files", "finish"],
+  "sandbox": { "shell": true },
+  "limits": { "maxTurns": 16, "timeoutMs": 300000, "maxTokens": 8192 },
+  "concurrency": 2,
+  "sources": {
+    "stdin": { "enabled": true }
+  }
+}

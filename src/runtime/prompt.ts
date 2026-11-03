@@ -13,6 +13,8 @@ const MAX_CONTENT_CHARS = 8_000;
 export type EnvironmentDescription = {
   rules: string[];
   persistenceNote: string;
+  /** 覆盖 AGENTS.md 里对工作目录生命周期的描述；缺省是「随本次运行创建」。 */
+  workspaceNote?: string;
 };
 
 export const COLLAB_ENVIRONMENT: EnvironmentDescription = {
@@ -90,7 +92,7 @@ export async function writeAgentsFile(
     '',
     '## 工作目录',
     '',
-    '这里是你这次运行的沙箱目录，随这次运行创建，结束后可能被清理。',
+    environment.workspaceNote ?? '这里是你这次运行的沙箱目录，随这次运行创建，结束后可能被清理。',
     environment.persistenceNote,
     '',
     '## 可用工具',

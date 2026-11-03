@@ -15,6 +15,7 @@ import {
   type FetchLike,
   type ToolCall,
 } from './types.ts';
+import { openModelResponse, parseJson, readSse } from './stream.ts';
 
 type Row = Record<string, unknown>;
 
@@ -36,13 +37,19 @@ export function openaiChatBrain(config: BrainConfig, fetchImpl: FetchLike): Brai
         }));
         body.tool_choice = 'auto';
       }
-      const parsed = await postJson(
+      if (request.onTextDelta) body.stream = true;
+      const opened = await openModelResponse(
         fetchImpl,
         joinUrl(config.baseUrl, '/chat/completions'),
         authHeaders(config.apiKey),
         body,
         request.signal,
+        request.onTextDelta !== undefined,
       );
+      if (opened.streaming) {
+        return await readChatStream(opened.response, request.onTextDelta);
+      }
+      const parsed = opened.parsed!;
       const choices = asArray(parsed.choices);
       const message = (choices[0] as Row | undefined)?.message as Row | undefined;
       if (!message) throw new Error('模型响应缺少 choices[0].message');
@@ -182,6 +189,73 @@ export function parseArguments(raw: unknown): Record<string, unknown> {
   } catch {
     return { raw };
   }
+}
+
+type ChatTool = { id: string; name: string; arguments: string };
+
+async function readChatStream(
+  response: Response,
+  onTextDelta?: (delta: string) => void,
+): Promise<BrainResponse> {
+  let text = '';
+  let stopReason = '';
+  let promptTokens: number | undefined;
+  let completionTokens: number | undefined;
+  const tools = new Map<number, ChatTool>();
+
+  await readSse(response, sse => {
+    const raw = sse.data.trim();
+    if (raw === '' || raw === '[DONE]') return;
+    const data = parseJson(raw);
+    const usage = asRow(data.usage);
+    if (typeof usage.prompt_tokens === 'number') promptTokens = usage.prompt_tokens;
+    if (typeof usage.completion_tokens === 'number') completionTokens = usage.completion_tokens;
+
+    const choice = asRow(asArray(data.choices)[0]);
+    const delta = asRow(choice.delta);
+    if (typeof delta.content === 'string') {
+      text += delta.content;
+      onTextDelta?.(delta.content);
+    } else if (Array.isArray(delta.content)) {
+      for (const part of delta.content) {
+        const piece = asRow(part);
+        if (typeof piece.text === 'string') {
+          text += piece.text;
+          onTextDelta?.(piece.text);
+        }
+      }
+    }
+    for (const [position, item] of asArray(delta.tool_calls).entries()) {
+      const call = asRow(item);
+      const index = typeof call.index === 'number' ? call.index : position;
+      const tool = tools.get(index) ?? { id: '', name: '', arguments: '' };
+      if (typeof call.id === 'string' && call.id) tool.id = call.id;
+      const fn = asRow(call.function);
+      if (typeof fn.name === 'string' && fn.name) tool.name = fn.name;
+      if (typeof fn.arguments === 'string') tool.arguments += fn.arguments;
+      tools.set(index, tool);
+    }
+    if (typeof choice.finish_reason === 'string') stopReason = choice.finish_reason;
+  });
+
+  const toolCalls: ToolCall[] = [...tools.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, tool]) => ({
+      id: tool.id || `call_${index}`,
+      name: tool.name,
+      input: parseArguments(tool.arguments),
+    }));
+
+  return {
+    ...(text ? { text } : {}),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    usage: { promptTokens, completionTokens },
+    stopReason,
+  };
+}
+
+function asRow(value: unknown): Row {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Row) : {};
 }
 
 function asArray(value: unknown): unknown[] {

@@ -313,6 +313,106 @@ export async function loadDefinition(
   file: string,
   options: LoadDefinitionOptions = {},
 ): Promise<EmbeddedAgentDefinition> {
+  const { raw, fallbackId } = await readDefinitionFile(file);
+  return normalizeDefinition(raw, fallbackId, options);
+}
+
+export type PlatformSourceConfig = {
+  enabled: boolean;
+  baseUrl: string;
+  agentId: string;
+  adminTokenEnv: string;
+  secretEnv: string;
+  pollMs: number;
+};
+
+export type ChatSourcesConfig = {
+  stdin: boolean;
+  platform: PlatformSourceConfig | null;
+};
+
+export type LoadedAgentFile = {
+  definition: EmbeddedAgentDefinition;
+  sources: ChatSourcesConfig;
+};
+
+/**
+ * 聊天 CLI 用的定义文件：与 loadDefinition 相同的定义规范化，
+ * 另外解析本地才有的 sources 段（平台定义里没有这一项）。
+ *
+ * 聊天默认 `completion: text`：文件里没写时才覆盖；写了就尊重文件。
+ * sessionIsolation 强制 inline，交互流式不能进子进程。
+ */
+export async function loadAgentFile(file: string): Promise<LoadedAgentFile> {
+  const { raw, fallbackId } = await readDefinitionFile(file);
+  const root = record(raw, '定义');
+  const definition = normalizeDefinition(raw, fallbackId, {
+    ...(root.completion === undefined ? { completion: 'text' as CompletionPolicy } : {}),
+  });
+  definition.sessionIsolation = 'inline';
+  return { definition, sources: parseChatSources(root.sources, definition.id) };
+}
+
+function parseChatSources(raw: unknown, agentId: string): ChatSourcesConfig {
+  if (raw === undefined) return { stdin: true, platform: null };
+  const sources = record(raw, 'sources');
+  for (const key of Object.keys(sources)) {
+    if (key !== 'stdin' && key !== 'platform') fail(`sources.${key}`, '不是已知来源');
+  }
+
+  let stdin = true;
+  if (sources.stdin !== undefined) {
+    const entry = record(sources.stdin, 'sources.stdin');
+    for (const key of Object.keys(entry)) {
+      if (key !== 'enabled') fail(`sources.stdin.${key}`, '不是已知字段');
+    }
+    if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean') {
+      fail('sources.stdin.enabled', '必须是布尔值');
+    }
+    stdin = entry.enabled !== false;
+  }
+
+  if (sources.platform === undefined) return { stdin, platform: null };
+  const platform = record(sources.platform, 'sources.platform');
+  for (const key of Object.keys(platform)) {
+    if (key === 'adminToken' || key === 'secret' || key === 'token') {
+      fail(`sources.platform.${key}`, '不能写明文凭据，只能给环境变量名');
+    }
+    if (!['enabled', 'baseUrl', 'agentId', 'adminTokenEnv', 'secretEnv', 'pollMs'].includes(key)) {
+      fail(`sources.platform.${key}`, '不是已知字段');
+    }
+  }
+  if (platform.enabled !== undefined && typeof platform.enabled !== 'boolean') {
+    fail('sources.platform.enabled', '必须是布尔值');
+  }
+  if (platform.enabled === false) return { stdin, platform: null };
+
+  const baseUrl = requireString(platform.baseUrl, 'sources.platform.baseUrl');
+  try {
+    const url = new URL(baseUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      fail('sources.platform.baseUrl', '必须是不带凭据的 HTTP(S) 地址');
+    }
+  } catch (error) {
+    if (error instanceof StandaloneConfigError) throw error;
+    fail('sources.platform.baseUrl', '不是合法地址');
+  }
+
+  return {
+    stdin,
+    platform: {
+      enabled: true,
+      baseUrl,
+      agentId: optionalString(platform.agentId, 'sources.platform.agentId') ?? agentId,
+      adminTokenEnv:
+        optionalString(platform.adminTokenEnv, 'sources.platform.adminTokenEnv') ?? 'COLLAB_RUNTIME_TOKEN',
+      secretEnv: optionalString(platform.secretEnv, 'sources.platform.secretEnv') ?? 'COLLAB_EMBEDDED_SECRET',
+      pollMs: positiveInt(platform.pollMs, 'sources.platform.pollMs', 3_000),
+    },
+  };
+}
+
+async function readDefinitionFile(file: string): Promise<{ raw: unknown; fallbackId: string }> {
   let text: string;
   try {
     text = await readFile(file, 'utf8');
@@ -327,6 +427,5 @@ export async function loadDefinition(
   } catch (error) {
     throw new StandaloneConfigError(`定义文件不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
   }
-  const fallbackId = basename(file).replace(/\.json$/i, '');
-  return normalizeDefinition(raw, fallbackId, options);
+  return { raw, fallbackId: basename(file).replace(/\.json$/i, '') };
 }

@@ -19,6 +19,8 @@ export type MessageRow = {
   body_json: string;
   reply_to: string | null;
   created_at: string;
+  /** 消息来源（stdin / platform / anp / agent）；缺省 anp，兼容旧库。 */
+  source: string;
 };
 
 export type InboxRow = {
@@ -36,6 +38,10 @@ export type InboxRow = {
   retry_at: number;
   lease_until: number | null;
   lease_token: string | null;
+  /** 这条消息由哪个 MessageSource 投递。 */
+  source: string;
+  /** 来源自己的投递凭据（JSON）；ack/nack 时原样带回来源。 */
+  source_delivery: string | null;
 };
 
 export type OutboxRow = {
@@ -75,6 +81,8 @@ export type NewInboxMessage = {
   body: unknown;
   replyTo?: string | null;
   receivedAt?: string;
+  source?: string;
+  sourceDelivery?: unknown;
 };
 
 export type NewOutboxMessage = {
@@ -183,6 +191,14 @@ const AGENT_MIGRATIONS = [
       'CREATE INDEX IF NOT EXISTS turns_thread ON turns (thread_id, started_at)',
     ],
   },
+  {
+    version: 2,
+    statements: [
+      `ALTER TABLE inbox ADD COLUMN source TEXT NOT NULL DEFAULT 'anp'`,
+      'ALTER TABLE inbox ADD COLUMN source_delivery TEXT',
+      `ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'anp'`,
+    ],
+  },
 ];
 
 export class AgentStore {
@@ -224,8 +240,8 @@ export class AgentStore {
   insertMessage(input: MessageRow): boolean {
     const result = this.db.run(
       `INSERT OR IGNORE INTO messages
-        (message_id, thread_id, direction, sender_did, target_did, content_type, body_json, reply_to, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (message_id, thread_id, direction, sender_did, target_did, content_type, body_json, reply_to, created_at, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.message_id,
       input.thread_id,
       input.direction,
@@ -235,6 +251,7 @@ export class AgentStore {
       input.body_json,
       input.reply_to ?? null,
       input.created_at,
+      input.source,
     );
     return result.changes === 1;
   }
@@ -244,10 +261,11 @@ export class AgentStore {
     return this.db.tx(() => {
       const receivedAt = input.receivedAt ?? nowIso();
       const bodyJson = JSON.stringify(input.body ?? {});
+      const source = input.source ?? 'anp';
       const inserted = this.db.run(
         `INSERT OR IGNORE INTO inbox
-          (message_id, thread_id, sender_did, target_did, content_type, body_json, reply_to, received_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          (message_id, thread_id, sender_did, target_did, content_type, body_json, reply_to, received_at, source, source_delivery)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.messageId,
         input.threadId,
         input.senderDid ?? null,
@@ -256,6 +274,8 @@ export class AgentStore {
         bodyJson,
         input.replyTo ?? null,
         receivedAt,
+        source,
+        input.sourceDelivery === undefined ? null : JSON.stringify(input.sourceDelivery),
       );
       if (inserted.changes === 0) return false;
       this.insertMessage({
@@ -268,6 +288,7 @@ export class AgentStore {
         body_json: bodyJson,
         reply_to: input.replyTo ?? null,
         created_at: receivedAt,
+        source,
       });
       this.touchThread(input.threadId);
       this.db.run(
@@ -458,6 +479,39 @@ export class AgentStore {
       .map(row => row.thread_id);
   }
 
+  /** 与 pendingThreadIds 相同，但带上每个 thread 的消息来源，供 host 排优先级。 */
+  pendingThreads(
+    now = Date.now(),
+    limit = 50,
+  ): Array<{ threadId: string; sources: string[] }> {
+    return this.db
+      .all<{ thread_id: string; sources: string | null; first_seq: number }>(
+        `SELECT thread_id, GROUP_CONCAT(DISTINCT source) AS sources, MIN(seq) AS first_seq
+         FROM inbox
+         WHERE status = 'pending' AND retry_at <= ?
+           AND (lease_until IS NULL OR lease_until <= ?)
+         GROUP BY thread_id
+         ORDER BY first_seq LIMIT ?`,
+        now,
+        now,
+        limit,
+      )
+      .map(row => ({
+        threadId: row.thread_id,
+        sources: row.sources ? row.sources.split(',').filter(Boolean) : [],
+      }));
+  }
+
+  /** 启动时把上次进程遗留的 running turn 收尾，避免一直显示进行中。 */
+  failRunningTurns(reason: string): number {
+    return this.db.run(
+      `UPDATE turns SET status = 'failed', error = ?, finished_at = ?
+       WHERE status = 'running'`,
+      reason,
+      nowIso(),
+    ).changes;
+  }
+
   inboxByMessage(messageId: string): InboxRow | undefined {
     return this.db.get<InboxRow>('SELECT * FROM inbox WHERE message_id = ?', messageId);
   }
@@ -488,6 +542,7 @@ export class AgentStore {
       body_json: JSON.stringify(input.body ?? {}),
       reply_to: input.replyTo ?? null,
       created_at: now,
+      source: 'agent',
     });
     this.touchThread(input.threadId);
     return this.db.get<OutboxRow>('SELECT * FROM outbox WHERE message_id = ?', input.messageId)!;

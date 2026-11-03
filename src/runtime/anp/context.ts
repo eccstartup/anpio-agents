@@ -49,7 +49,7 @@ function truncate(text: string): string {
   return text.length > MAX_CONTENT_CHARS ? `${text.slice(0, MAX_CONTENT_CHARS)}\n…（内容已截断）` : text;
 }
 
-function renderBody(row: MessageRow): string {
+export function renderBody(row: MessageRow): string {
   let body: Record<string, unknown> = {};
   try {
     body = asRecord(JSON.parse(row.body_json));
@@ -112,7 +112,12 @@ export type ThreadContext = {
 export function buildThreadContext(
   store: AgentStore,
   threadId: string,
-  options: { maxMessages?: number; maxBytes?: number } = {},
+  options: {
+    maxMessages?: number;
+    maxBytes?: number;
+    /** 覆盖消息渲染；缺省是 ANP 前缀。通用 thread 路径传入来源无关的渲染。 */
+    renderRow?: (row: MessageRow) => ChatMessage;
+  } = {},
 ): ThreadContext {
   const total = store.countMessages(threadId);
   let rows = store.history(threadId, {
@@ -124,7 +129,7 @@ export function buildThreadContext(
     rows = [first, ...rows];
   }
   const omitted = Math.max(0, total - rows.length);
-  const messages = mergeAdjacent(rows.map(renderRow));
+  const messages = mergeAdjacent(rows.map(options.renderRow ?? renderRow));
   if (omitted > 0) {
     const note = `（省略 ${omitted} 条较早消息）`;
     const head = messages[0];
