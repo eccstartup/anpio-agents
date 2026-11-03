@@ -1,6 +1,6 @@
 # anpio-agents：统一线程智能体 + 多消息来源
 
-- 状态：已实施（平台路径用 fake client 单测覆盖，尚待真实平台验收）
+- 状态：已实施，并完成真实平台验收（2026-11-03）
 - 日期：2026-11-03
 - 范围：新增 `anpio-agents` 交互式命令；现有接口全部保留
 - 前置：`docs/standalone-plan.md`、`docs/anp-runtime-plan.md`
@@ -280,3 +280,18 @@ COLLAB_RUNTIME_TOKEN=... COLLAB_EMBEDDED_SECRET=... \
 ## 17. 一个假设
 
 平台侧只通过信箱订阅消费消息，不创建 platform run 记录。任务动作（`task_submit`、评论、文件）仍通过工具完成。如果必须保留 run 记录，以后用 `beginTurn` 钩子加，不去抢 supervisor 的 run。
+
+## 18. 验收记录（2026-11-03）
+
+环境：本地 `anpio-collab`（独立 SQLite，`COLLAB_BOOTSTRAP_TOKEN` + `COLLAB_EMBEDDED_SECRET`），本地定义用 `script` 协议保证确定性，平台侧另建一个 script 智能体定义。
+
+结果：
+
+- `ensure` + 派生令牌成功打开长期信箱会话，进程内日志出现「平台信箱已连接」。
+- 在平台建任务并两次 `assign` 子任务，平台各发布一条 `subtask.assigned`；智能体在同一 task thread 内完成两轮：
+  - 本地 inbox 两条消息均 `acked`，thread 内 `2 in + 2 out`，两个 turn 均 `succeeded`；
+  - 平台 `mailbox_deliveries` 两行均为 `acked`。
+- 本地 stdin 消息与平台子任务在同一进程并行：`local:main` 与 task id 两个 thread 各自完成，本地输出在 stdout、平台事件以 `[platform]` 前缀写 stderr。
+- 平台 `embedded_runs` 为 0，`lastRunAt` 仍为 `null`；平台定义 `updatedAt` 未变化——没有 `import`、没有同步本地定义、没有创建平台 run。
+
+已知边界：真实平台消息正文按 `ref` 读取；如果投递的 `refType/refId` 指向不存在的子任务，平台会返回「消息正文不可访问」，这类投递会按退避持续重试。这是平台侧数据问题，订阅与 ack/nack 路径本身正常。
