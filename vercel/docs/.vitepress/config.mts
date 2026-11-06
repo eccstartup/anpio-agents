@@ -20,6 +20,7 @@ export default defineConfig({
     siteTitle: 'Anpio Agents',
     nav: [
       { text: '指南', link: '/guide/overview' },
+      { text: '记忆', link: '/guide/memory' },
       { text: '自运行', link: '/guide/standalone' },
       { text: 'Collab 调用', link: '/guide/collab' },
       { text: '参考', link: '/guide/definition' },
@@ -29,7 +30,10 @@ export default defineConfig({
       '/guide/': [
         {
           text: '认识引擎',
-          items: [{ text: '总览', link: '/guide/overview' }]
+          items: [
+            { text: '总览', link: '/guide/overview' },
+            { text: '记忆与会话', link: '/guide/memory' }
+          ]
         },
         {
           text: '运行方式',

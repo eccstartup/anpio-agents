@@ -9,6 +9,8 @@ description: 用一个 MCP server 把流水线日志、监控与环节执行接�
 
 当前实现：**stdio 传输**（本地子进程），协议层用官方 `@modelcontextprotocol/sdk`。HTTP 传输与平台侧审批属于后续阶段。
 
+只接入 MCP 的 **tools**：`resources`、`prompts`、`sampling` 不会暴露给模型。需要让模型读一份文档时，把它包装成一个只读工具返回文本。
+
 ## 5 分钟接入
 
 外部接入只碰你自己仓库里的文件，全程不需要读引擎源码。

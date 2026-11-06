@@ -50,6 +50,7 @@ http / 定时  ─┘      │             │                        ├─ 本
 
 | 文档 | 内容 |
 | --- | --- |
+| [记忆与会话](/guide/memory) | 会话事件、带证据等级的长期记忆、团队经验与每轮上下文装配 |
 | [自运行](/guide/standalone) | 交互式对话、一次性运行、HTTP 常驻服务、密钥与数据目录 |
 | [Collab 调用](/guide/collab) | supervisor、平台来源、ANP router、消息确认与上线清单 |
 | [定义文件](/guide/definition) | 字段参考、协议、工具、来源与校验规则 |

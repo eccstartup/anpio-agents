@@ -129,7 +129,8 @@ npm run anp:send -- --from planner --to worker --thread t1 --text "把这份目�
 
 常用能力：
 
-- 协作工具：`anp_send`、`anp_reply`、`anp_list_messages`、`anp_get_message`、`list_agents`、`agent_status`、`memory_get`、`memory_set`、`finish_turn`。
+- 协作工具：`anp_send`、`anp_reply`、`anp_list_messages`、`anp_get_message`、`list_agents`、`agent_status`、`finish_turn`。
+- 记忆与经验：`memory_*`、`session_*`、`knowledge_*` 在三种运行方式下都由引擎提供，见[记忆与会话](/guide/memory)。
 - 定时任务：`anp.allowSchedules` 打开后可用 `schedule_create` / `schedule_cancel` / `list_schedules`，支持 `at`、`interval`、`cron`。
 - 子 agent：父定义 `anp.allowSpawn=true` 时可创建子 agent，工具只能从父收缩，默认深度 2、每个父最多 3 个。
 - 联网：`anp.network` 为 `none` / `egress` / `open`；默认 `egress` 且 allowlist 为空，即不能用 `http_fetch`。

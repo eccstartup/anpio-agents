@@ -122,9 +122,20 @@ description: provider、tools、limits、sources、scopes 与 anp 字段，以�
 | `list_files` | 列工作目录 |
 | `finish` | 结束本轮并给出摘要 |
 
-**平台工具**（需要 Collab 的工具后端）：`task_get`、`subtask_inbox`、`task_accept`、`task_progress`、`task_submit`、`subtask_reject`、`task_comment`、`task_comments`、`offer_list`、`offer_claim`、`task_files`、`file_download`、`file_upload`、`knowledge_search`。
+**引擎工具**（执行引擎提供，三种运行方式都可用）：
 
-**router 工具**（ANP router 提供）：`anp_send`、`anp_reply`、`anp_list_messages`、`anp_get_message`、`list_agents`、`agent_status`、`spawn_agent`、`schedule_create`、`schedule_cancel`、`list_schedules`、`http_fetch`、`memory_get`、`memory_set`、`finish_turn`。
+| 工具 | 作用 |
+| --- | --- |
+| `memory_search` / `memory_get` / `memory_set` / `memory_forget` | 检索、读取、写入与归档本 agent 的长期记忆 |
+| `session_search` / `session_peek` | 跨会话查摘要、看脱敏后的最近事件 |
+| `knowledge_search` / `knowledge_get` | 检索与读取已发布的团队经验 |
+| `knowledge_cite` / `knowledge_contribute` | 记录引用、提名候选（发布只能由人完成） |
+
+细节、证据等级与配额见[记忆与会话](/guide/memory)。
+
+**平台工具**（需要 Collab 的工具后端）：`task_get`、`subtask_inbox`、`task_accept`、`task_progress`、`task_submit`、`subtask_reject`、`task_comment`、`task_comments`、`offer_list`、`offer_claim`、`task_files`、`file_download`、`file_upload`。
+
+**router 工具**（ANP router 提供）：`anp_send`、`anp_reply`、`anp_list_messages`、`anp_get_message`、`list_agents`、`agent_status`、`spawn_agent`、`schedule_create`、`schedule_cancel`、`list_schedules`、`http_fetch`、`finish_turn`。
 
 **插件工具**（`plugins` 里的 MCP server 提供）：名字形如 `plugin__<id>__<tool>`，只暴露每个插件 `allow` 里的工具。`tools` 数组只接受内置工具；插件工具写在 `plugins[].allow`，不是 `tools`。字段与接入方式见[外部插件](/guide/plugins)。
 

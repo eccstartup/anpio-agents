@@ -38,6 +38,8 @@ ANTHROPIC_API_KEY=... npm run agents -- --agent examples/local-chat.json
 | --- | --- |
 | `/new` | 下一条消息开一个新 thread |
 | `/status` | 查看运行中的 thread 与消息来源 |
+| `/memory` | 查看、检索、写入、归档、置顶长期记忆；`/memory stats` 看证据分布 |
+| `/session` | 查看与搜索过去的会话摘要 |
 | `/help` | 显示命令帮助 |
 | `/exit`、`/quit`、Ctrl-D | 退出 |
 | Ctrl-C | 中止当前 thread 的这一轮；空闲时连按两次退出 |
@@ -180,7 +182,7 @@ anpio-agents --agent agent-runs/local-router.json
 | --- | --- |
 | `<root>/<agentId>/workspace/threads/<threadId>/` | 每个 thread 的工作目录，跨轮保留 |
 | `<root>/<agentId>/sessions/<runId>/` | 一次运行的临时目录，结束后删除 |
-| `<root>/<agentId>/agent.db` | thread、消息、待办与运行记录 |
+| `<root>/<agentId>/agent.db` | thread、消息、待办、运行记录、会话事件、长期记忆与上下文清单 |
 | `<root>/.local/conversations/` | 一次性运行的多轮历史 |
 | `<root>/.local/` | 本地信箱、运行记录与在线状态 |
 
