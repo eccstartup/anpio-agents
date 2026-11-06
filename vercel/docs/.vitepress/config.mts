@@ -1,4 +1,22 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { defineConfig } from 'vitepress'
+
+const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/
+
+// The built site no longer serves the .md files, so stash each page's Markdown in its
+// page data for the Copy for Agent button to read at runtime.
+function readAgentMarkdown(filePath: string | undefined, srcDir: string) {
+  if (!filePath) return undefined
+  try {
+    return fs
+      .readFileSync(path.join(srcDir, filePath), 'utf8')
+      .replace(FRONTMATTER_RE, '')
+      .trimStart()
+  } catch {
+    return undefined
+  }
+}
 
 export default defineConfig({
   lang: 'zh-CN',
@@ -6,6 +24,10 @@ export default defineConfig({
   titleTemplate: ':title · Anpio Agents',
   description: 'ANPIO 的智能体执行引擎：自运行、接入 anpio-collab、用插件连接外部流水线。',
   cleanUrls: true,
+  transformPageData(pageData, { siteConfig }) {
+    const agentMarkdown = readAgentMarkdown(pageData.filePath, siteConfig.srcDir)
+    if (agentMarkdown) return { agentMarkdown }
+  },
   lastUpdated: true,
   head: [
     ['link', { rel: 'icon', href: '/logo.svg', type: 'image/svg+xml' }],
