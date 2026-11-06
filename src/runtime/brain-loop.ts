@@ -6,8 +6,8 @@
  */
 
 import type { ChatMessage, ToolCall, ToolSpec } from '../brains/types.ts';
-import type { Brain } from '../brains/types.ts';
-import type { ToolExecution } from '../tools.ts';
+import type { Brain, BrainUsage } from '../brains/types.ts';
+import type { RememberItem, ToolExecution } from '../tools.ts';
 import { substitute } from './prompt.ts';
 import type { LogLevel } from './types.ts';
 
@@ -42,10 +42,28 @@ export type BrainLoopOptions = {
   stream?: boolean;
   /** 运行事件的细粒度观察口；不影响日志与结果。 */
   onEvent?: (event: BrainLoopEvent) => void;
+  /** 每次模型调用前重新装配系统提示（记忆/团队经验按调用而不是按轮次）。 */
+  contextProvider?: (input: {
+    turn: number;
+    messages: ChatMessage[];
+  }) => Promise<{ system: string }> | { system: string };
+  onModelRequest?: (input: {
+    turn: number;
+    system: string;
+    messages: ChatMessage[];
+    tools: ToolSpec[];
+  }) => void | Promise<void>;
+  onModelResponse?: (input: {
+    turn: number;
+    text: string;
+    toolCalls: ToolCall[];
+    usage?: BrainUsage;
+    stopReason?: string;
+  }) => void | Promise<void>;
 };
 
 export type BrainLoopResult = {
-  finished: { summary: string; outcome: string } | null;
+  finished: { summary: string; outcome: string; remember?: RememberItem[] } | null;
   status: 'succeeded' | 'failed' | 'outcome_unknown';
   error: string | null;
   turns: number;
@@ -79,8 +97,17 @@ export async function runBrainLoop(options: BrainLoopOptions): Promise<BrainLoop
     }
     outcome.turns += 1;
     await options.heartbeat?.();
+    const turnSystem = options.contextProvider
+      ? (await options.contextProvider({ turn: outcome.turns, messages })).system
+      : system;
+    await options.onModelRequest?.({
+      turn: outcome.turns,
+      system: turnSystem,
+      messages,
+      tools: tools.specs,
+    });
     const response = await brain.complete({
-      system,
+      system: turnSystem,
       messages,
       tools: tools.specs,
       maxTokens: options.maxTokens,
@@ -88,6 +115,13 @@ export async function runBrainLoop(options: BrainLoopOptions): Promise<BrainLoop
       ...(options.stream && options.onEvent
         ? { onTextDelta: (delta: string) => options.onEvent!({ type: 'text-delta', text: delta }) }
         : {}),
+    });
+    await options.onModelResponse?.({
+      turn: outcome.turns,
+      text: response.text ?? '',
+      toolCalls: response.toolCalls ?? [],
+      ...(response.usage ? { usage: response.usage } : {}),
+      ...(response.stopReason ? { stopReason: response.stopReason } : {}),
     });
     outcome.promptTokens += response.usage?.promptTokens ?? 0;
     outcome.completionTokens += response.usage?.completionTokens ?? 0;

@@ -12,6 +12,8 @@ import type { StdinSource } from '../sources/stdin.ts';
 const HELP = `命令：
   /new       下一条消息开一个新的 thread
   /status    查看运行中的 thread 与来源
+  /memory    查看长期记忆（search <词> / set <key> <内容> / forget <key> / pin <key> / unpin <key>）
+  /session   查看会话索引（list / search <词>）
   /mcp       查看已接入的 MCP 插件
   /mcp add <id=命令 参数>   运行时接入一个 MCP server
   /mcp remove <id>          断开并移除插件
@@ -23,6 +25,11 @@ export type ReplPluginControl = {
   list(): string;
   add(spec: string): Promise<string>;
   remove(id: string): Promise<string>;
+};
+
+/** 记忆/会话只读+维护命令；由入口注入本地 agent.db。 */
+export type ReplMemoryControl = {
+  command(rest: string): Promise<string> | string;
 };
 
 type TurnState = {
@@ -180,6 +187,7 @@ export type ReplOptions = {
   host: ThreadHost;
   stdin: StdinSource;
   plugins?: ReplPluginControl;
+  memory?: ReplMemoryControl;
   output?: NodeJS.WritableStream;
   error?: NodeJS.WritableStream;
 };
@@ -188,6 +196,7 @@ export class Repl {
   private readonly host: ThreadHost;
   private readonly stdin: StdinSource;
   private readonly pluginControl: ReplPluginControl | undefined;
+  private readonly memoryControl: ReplMemoryControl | undefined;
   private readonly out: NodeJS.WritableStream;
   private readonly err: NodeJS.WritableStream;
   private currentThreadId = 'local:main';
@@ -200,6 +209,7 @@ export class Repl {
     this.host = options.host;
     this.stdin = options.stdin;
     this.pluginControl = options.plugins;
+    this.memoryControl = options.memory;
     this.out = options.output ?? process.stdout;
     this.err = options.error ?? process.stderr;
     this.stdin.onCommand = command => this.command(command);
@@ -258,6 +268,17 @@ export class Repl {
         void this.pluginCommand(rest);
         return true;
       }
+      case '/memory':
+      case '/session': {
+        if (!this.memoryControl) {
+          this.err.write('这个入口没有接入本地记忆。\n');
+          this.stdin.prompt();
+          return true;
+        }
+        const rest = raw.trim().slice(name.length).trim();
+        void this.memoryCommand(name === '/memory' ? `memory ${rest}` : `session ${rest}`);
+        return true;
+      }
       case '/help':
         this.out.write(`${HELP}\n`);
         this.stdin.prompt();
@@ -311,6 +332,19 @@ export class Repl {
   private async pluginAdd(control: ReplPluginControl, spec: string): Promise<void> {
     if (this.busy()) return;
     this.out.write(`${await control.add(spec)}\n`);
+  }
+
+  /** `/memory ...` 与 `/session ...`：本地 agent.db 的查看与维护。 */
+  private async memoryCommand(rest: string): Promise<void> {
+    const control = this.memoryControl;
+    if (!control) return;
+    try {
+      this.out.write(`${await control.command(rest)}\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.err.write(`记忆操作失败：${message}\n`);
+    }
+    this.stdin.prompt();
   }
 
   private busy(): boolean {

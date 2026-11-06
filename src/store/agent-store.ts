@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { MEMORY_SCHEMA_STATEMENTS } from './memory-schema.ts';
 import { SqliteDb, migrate, nowIso } from './sqlite.ts';
 
 export type MessageDirection = 'in' | 'out';
@@ -198,6 +199,11 @@ const AGENT_MIGRATIONS = [
       'ALTER TABLE inbox ADD COLUMN source_delivery TEXT',
       `ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'anp'`,
     ],
+  },
+  {
+    // 会话日志、记忆、经验缓存与上下文清单；MemoryStore 也会独立建同一批表。
+    version: 3,
+    statements: MEMORY_SCHEMA_STATEMENTS,
   },
 ];
 

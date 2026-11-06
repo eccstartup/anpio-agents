@@ -8,8 +8,11 @@
 import type { AnpPayload } from '../anp/client.ts';
 import type { ToolSpec } from '../brains/types.ts';
 import type { EmbeddedTool } from '../definition.ts';
+import type { MemoryStore, Memory } from '../memory/store.ts';
+import { MEMORY_KINDS } from '../memory/store.ts';
+import type { SessionEventLog } from '../session/events.ts';
 import type { AgentStore, MessageRow } from '../store/agent-store.ts';
-import type { ToolExecution } from '../tools.ts';
+import type { RememberItem, ToolExecution } from '../tools.ts';
 
 export type AnpSendToolInput = {
   to: string;
@@ -32,6 +35,10 @@ export type AnpToolContext = {
   store: AgentStore;
   send: (input: AnpSendToolInput) => Promise<AnpSendToolResult>;
   markReplied: () => void;
+  /** 新的长期记忆；没有时回落到 agent.db 的 notes。 */
+  memory?: MemoryStore;
+  events?: SessionEventLog;
+  turnId?: string;
 };
 
 type Schema = Record<string, unknown>;
@@ -125,17 +132,38 @@ export const ANP_TOOL_SPECS = {
   },
   memory_set: {
     name: 'memory_set',
-    description: '写入自己的长期笔记（覆盖同名键）。',
-    parameters: schema({ key: { type: 'string' }, value: { type: 'string' } }),
+    description: '写入自己的长期记忆（覆盖同名键）。内容应是一条可复用的判断。',
+    parameters: schema({
+      key: { type: 'string', description: '稳定的记忆键，例如 project.test-command' },
+      content: { type: 'string', description: '记忆内容' },
+      value: { type: 'string', description: '兼容旧参数；没有 content 时使用' },
+      kind: { type: 'string', enum: MEMORY_KINDS },
+      tags: { type: 'array', items: { type: 'string' } },
+    }, ['key']),
   },
   finish_turn: {
     name: 'finish_turn',
-    description: '结束本轮并给出摘要；与 finish 等价，便于 ANP 运行区分。',
+    description: '结束本轮并给出摘要；与 finish 等价，便于 ANP 运行区分。可选地留下最多 3 条长期记忆。',
     parameters: schema({
       summary: { type: 'string', description: '这一轮做了什么' },
       outcome: {
         type: 'string',
         enum: ['done', 'nothing_to_do', 'blocked'],
+      },
+      remember: {
+        type: 'array',
+        maxItems: 3,
+        description: '可选：最多 3 条值得跨会话保留的判断',
+        items: {
+          type: 'object',
+          properties: {
+            key: { type: 'string' },
+            content: { type: 'string' },
+            kind: { type: 'string', enum: MEMORY_KINDS },
+            tags: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['key', 'content'],
+        },
       },
     }, ['summary']),
   },
@@ -205,24 +233,102 @@ export async function executeAnpTool(
 
     case 'memory_get': {
       const key = textOf(input, 'key', 256);
+      if (context.memory) {
+        const row = context.memory.getByKey(context.agentId, key, { includeArchived: true });
+        return { content: render(row ? memoryView(row) : { key, value: null }) };
+      }
       return { content: render({ key, value: context.store.getNote(key) ?? null }) };
     }
 
     case 'memory_set': {
       const key = textOf(input, 'key', 256);
-      const value = typeof input.value === 'string' ? input.value : JSON.stringify(input.value ?? null);
-      if (value.length > 64_000) throw new Error('笔记内容过长（上限 64000 字符）');
-      context.store.setNote(key, value);
-      return { content: render({ saved: true, key, bytes: Buffer.byteLength(value, 'utf8') }) };
+      const content = optionalText(input, 'content')
+        ?? (typeof input.value === 'string' ? input.value : JSON.stringify(input.value ?? null));
+      if (!context.memory) {
+        if (content.length > 64_000) throw new Error('笔记内容过长（上限 64000 字符）');
+        context.store.setNote(key, content);
+        return { content: render({ saved: true, key, bytes: Buffer.byteLength(content, 'utf8') }) };
+      }
+      const kind = typeof input.kind === 'string' && (MEMORY_KINDS as readonly string[]).includes(input.kind)
+        ? (input.kind as RememberItem['kind'])
+        : undefined;
+      const tags = Array.isArray(input.tags)
+        ? input.tags.filter((tag): tag is string => typeof tag === 'string')
+        : undefined;
+      const written = context.memory.write({
+        agentId: context.agentId,
+        key,
+        content,
+        ...(kind ? { kind } : {}),
+        ...(tags ? { tags } : {}),
+        sourceSessionId: context.threadId,
+        sourceTurnId: context.turnId ?? null,
+        sourceEventSeq: context.events?.lastSeq(context.threadId) ?? null,
+        actor: 'agent',
+      });
+      context.events?.tryAppend({
+        sessionId: context.threadId,
+        turnId: context.turnId ?? null,
+        kind: 'memory.written',
+        actor: 'agent',
+        payload: { key: written.memory.key, created: written.created },
+      });
+      return {
+        content: render({
+          saved: true,
+          key: written.memory.key,
+          maturity: written.memory.maturity,
+          unchanged: written.unchanged,
+        }),
+      };
     }
 
     case 'finish_turn': {
       const summary = textOf(input, 'summary', 2_000);
       const outcome = typeof input.outcome === 'string' ? input.outcome : 'done';
-      return { content: '本轮结束。', finish: { summary, outcome } };
+      const remember = rememberItems(input);
+      return { content: '本轮结束。', finish: { summary, outcome, ...(remember ? { remember } : {}) } };
     }
 
     default:
       return null;
   }
+}
+
+function memoryView(row: Memory): Record<string, unknown> {
+  return {
+    key: row.key,
+    kind: row.kind,
+    maturity: row.maturity,
+    content: row.content,
+    tags: row.tags,
+    pinned: row.pinned,
+    useCount: row.use_count,
+    successCount: row.success_count,
+    updatedAt: row.updated_at,
+    ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
+  };
+}
+
+function rememberItems(input: Record<string, unknown>): RememberItem[] | undefined {
+  if (!Array.isArray(input.remember)) return undefined;
+  const items: RememberItem[] = [];
+  for (const raw of input.remember.slice(0, 3)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const record = raw as Record<string, unknown>;
+    if (typeof record.key !== 'string' || typeof record.content !== 'string') continue;
+    const kind = typeof record.kind === 'string' && (MEMORY_KINDS as readonly string[]).includes(record.kind)
+      ? (record.kind as RememberItem['kind'])
+      : undefined;
+    const tags = Array.isArray(record.tags)
+      ? record.tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 12)
+      : undefined;
+    items.push({
+      key: record.key.slice(0, 64),
+      content: record.content.slice(0, 2_000),
+      ...(kind ? { kind } : {}),
+      ...(tags && tags.length > 0 ? { tags } : {}),
+    });
+  }
+  return items.length > 0 ? items : undefined;
 }

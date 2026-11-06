@@ -6,7 +6,7 @@
  */
 
 import { join, resolve } from 'node:path';
-import { isLocalTool, type EmbeddedTool } from '../../definition.ts';
+import { isEngineTool, isLocalTool, type EmbeddedTool } from '../../definition.ts';
 import { LOCAL_ENVIRONMENT } from '../prompt.ts';
 import type { AgentTransport, PresencePort, ToolBackend } from '../transport.ts';
 import type { LogLevel } from '../types.ts';
@@ -86,7 +86,7 @@ export function localTransport(options: LocalTransportOptions = {}): LocalTransp
     presence,
     root,
     tools,
-    supportsTool: (name: EmbeddedTool) => isLocalTool(name) || Boolean(tools),
+    supportsTool: (name: EmbeddedTool) => isLocalTool(name) || isEngineTool(name) || Boolean(tools),
     environment: LOCAL_ENVIRONMENT,
     spawnConfig: () => ({ type: 'local', root }),
     enqueue: input => mailbox.enqueue(input),

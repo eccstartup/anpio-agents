@@ -8,11 +8,15 @@
 import { createHash } from 'node:crypto';
 import type { BrainLoopTools } from '../runtime/brain-loop.ts';
 import type { AnpMailbox } from '../runtime/anp/mailbox.ts';
+import type { ExperienceClient } from '../experience/client.ts';
+import type { MemoryStore } from '../memory/store.ts';
+import type { SessionEventLog } from '../session/events.ts';
+import type { SessionIndex } from '../session/index.ts';
 import type { AgentStore } from '../store/agent-store.ts';
 import { createTools, type LocalToolExecutor, type ToolExecution } from '../tools.ts';
 import type { ToolCall, ToolSpec } from '../brains/types.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from '../definition.ts';
-import { isLocalTool, isRouterTool } from '../definition.ts';
+import { isEngineTool, isLocalTool, isRouterTool } from '../definition.ts';
 import { ANP_TOOL_SPECS, executeAnpTool, type AnpToolContext } from '../tools/anp.ts';
 import {
   SUBAGENT_TOOL_SPECS,
@@ -40,6 +44,11 @@ export type TurnToolInput = {
   local?: LocalToolExecutor;
   /** 本地原语的清理动作；turn 结束后调用。 */
   dispose?: () => Promise<void>;
+  /** 记忆/会话/团队经验；由 router 的 AgentRuntime 注入。 */
+  memory?: MemoryStore;
+  events?: SessionEventLog;
+  sessionIndex?: SessionIndex;
+  experience?: ExperienceClient;
 };
 
 export type TurnToolCallbacks = {
@@ -88,17 +97,24 @@ function render(value: unknown): string {
 
 export function createTurnTools(input: TurnToolInput, callbacks: TurnToolCallbacks): BrainLoopTools {
   const enabled = new Set<string>(input.definition.tools);
-  const localNames = input.definition.tools.filter(isLocalTool);
+  const localNames = input.definition.tools.filter(tool => isLocalTool(tool) || isEngineTool(tool));
   const local = createTools({
     runDir: input.runDir,
     runId: input.turnId,
     definition: input.definition,
     tools: localNames,
     ...(input.local ? { local: input.local } : {}),
+    ...(input.memory ? { memory: input.memory } : {}),
+    ...(input.events ? { events: input.events } : {}),
+    ...(input.sessionIndex ? { sessionIndex: input.sessionIndex } : {}),
+    ...(input.experience ? { experience: input.experience } : {}),
+    agentId: input.definition.id,
+    sessionId: input.threadId,
+    turnId: input.turnId,
     log: callbacks.log ?? (() => undefined),
   });
   const extraSpecs = input.definition.tools
-    .filter(tool => isRouterTool(tool) && enabled.has(tool))
+    .filter(tool => enabled.has(tool))
     .map(tool => EXTRA_SPECS[tool])
     .filter((spec): spec is ToolSpec => Boolean(spec));
   const specs = [...local.specs, ...extraSpecs];
@@ -110,6 +126,9 @@ export function createTurnTools(input: TurnToolInput, callbacks: TurnToolCallbac
     store: input.store,
     send: callbacks.send,
     markReplied: input.markReplied,
+    ...(input.memory ? { memory: input.memory } : {}),
+    ...(input.events ? { events: input.events } : {}),
+    turnId: input.turnId,
   };
   const network: NetworkPolicy = { mode: callbacks.network, allowlist: callbacks.allowlist };
 

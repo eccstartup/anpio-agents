@@ -15,6 +15,7 @@
     "router": "node --disable-warning=ExperimentalWarning src/router/main.ts",
     "anp:send": "node --disable-warning=ExperimentalWarning src/anp/send-cli.ts",
     "plugin:check": "node --disable-warning=ExperimentalWarning src/plugins/check-cli.ts",
+    "memory": "node --disable-warning=ExperimentalWarning src/memory/cli.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "agents": "node --disable-warning=ExperimentalWarning --use-system-ca src/chat/cli.ts"

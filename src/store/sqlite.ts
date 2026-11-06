@@ -26,8 +26,9 @@ export class SqliteDb {
       mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
     }
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL');
+    // busy_timeout 要先设：切 WAL 需要短暂的写锁，多进程同时首次打开会撞锁。
     this.db.exec('PRAGMA busy_timeout = 5000');
+    this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.db.exec('PRAGMA synchronous = NORMAL');
   }

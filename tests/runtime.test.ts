@@ -229,3 +229,46 @@ test('AgentRuntime：并发 Session 受 definition.concurrency 约束', { timeou
     assert.equal(fake.maxActive(), 1);
   });
 });
+
+test('AgentRuntime：记忆工具与 finish.remember 写进 agent.db 并留下事件', { timeout: 20_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'anpio-memory-'));
+  let runtime: AgentRuntime | null = null;
+  const fake = fakeClient(() => runtime?.activeSessions ?? 0);
+  try {
+    const agent = definition(1);
+    agent.tools = ['memory_set', 'memory_get', 'finish'];
+    agent.scopes = [];
+    agent.provider.script = [
+      { tool: 'memory_set', input: { key: 'deploy.port', content: '部署端口是 8080' } },
+      { tool: 'memory_get', input: { key: 'deploy.port' } },
+      {
+        tool: 'finish',
+        input: {
+          summary: '记住端口',
+          outcome: 'done',
+          remember: [{ key: 'deploy.checked', content: '部署前检查 8080 端口' }],
+        },
+      },
+    ];
+    runtime = await AgentRuntime.create({
+      agentId: 'agent1',
+      definition: agent,
+      transport: collabTransport(fake.client, { baseUrl: 'http://127.0.0.1:1', token: 'test-token' }),
+      rootBase: root,
+    });
+
+    const result = await runtime.runSession({ runId: 'run-mem' });
+    assert.equal(result.status, 'succeeded');
+    assert.equal(runtime.memory.getByKey('agent1', 'deploy.port')?.content, '部署端口是 8080');
+    assert.equal(runtime.memory.getByKey('agent1', 'deploy.checked')?.content, '部署前检查 8080 端口');
+
+    const kinds = runtime.sessionLog.read('run-mem').map(event => event.kind);
+    assert.ok(kinds.includes('context.assembled'), kinds.join(','));
+    assert.ok(kinds.includes('model.request'), kinds.join(','));
+    assert.ok(kinds.includes('memory.written'), kinds.join(','));
+    assert.ok(kinds.includes('turn.end'), kinds.join(','));
+  } finally {
+    await runtime?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

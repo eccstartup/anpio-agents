@@ -8,7 +8,9 @@
 import type { ChatMessage } from '../../brains/types.ts';
 import type { MailEnvelope } from '../../client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from '../../definition.ts';
-import { isLocalTool } from '../../definition.ts';
+import { isEngineTool, isLocalTool } from '../../definition.ts';
+import { ContextAssembler } from '../context.ts';
+import { modelRequestPayload } from '../../session/events.ts';
 import { createTools } from '../../tools.ts';
 import { declaredPluginTools } from '../../plugins/naming.ts';
 import { withPlugins } from '../../plugins/tools.ts';
@@ -124,6 +126,17 @@ export class AnpTurnSession implements SessionTask {
     const workdir = await ensureThreadWorkspace(this.runtime.root, this.threadId);
     this.workdir = workdir;
     this.runtime.sessionBegin();
+    const events = this.runtime.sessionLog;
+    const index = this.runtime.sessionIndex;
+    events.tryAppend({
+      sessionId: this.threadId,
+      turnId: this.turnId,
+      runId: this.runId,
+      kind: 'session.start',
+      actor: 'system',
+      payload: { agentId: this.runtime.agentId, definitionId: this.definition.id, title: this.definition.name },
+    });
+    index.ensure({ sessionId: this.threadId, kind: 'thread', title: this.definition.name });
     const available = this.availableTools();
     await writeAgentsFile(
       workdir,
@@ -209,6 +222,80 @@ export class AnpTurnSession implements SessionTask {
         signal: this.deadline.signal,
         log: () => undefined,
         heartbeat,
+        contextProvider: async ({ turn, messages: current }) => {
+          const taskId = this.pulled.find(item => item.ref.taskId)?.ref.taskId ?? null;
+          const assembler = new ContextAssembler({
+            agentId: this.runtime.agentId,
+            sessionId: this.threadId,
+            turnId: `${this.turnId}:t${turn}`,
+            baseSystem: system,
+            memory: this.runtime.memory,
+            experience: this.runtime.experience,
+            events,
+            db: this.runtime.store,
+            scopeHint: this.threadId,
+            ...(taskId ? { taskId } : {}),
+          });
+          const assembled = await assembler.assemble({
+            messages: current,
+            extraQuery: [this.definition.name, this.definition.description].filter(Boolean),
+          });
+          return { system: assembled.system };
+        },
+        onModelRequest: ({ turn, system: currentSystem, messages: current, tools: specs }) => {
+          events.tryAppend({
+            sessionId: this.threadId,
+            turnId: `${this.turnId}:t${turn}`,
+            runId: this.runId,
+            kind: 'model.request',
+            actor: 'system',
+            payload: modelRequestPayload({
+              system: currentSystem,
+              messages: current,
+              tools: specs.map(spec => spec.name),
+            }),
+          });
+        },
+        onModelResponse: ({ turn, text, toolCalls, usage, stopReason }) => {
+          events.tryAppend({
+            sessionId: this.threadId,
+            turnId: `${this.turnId}:t${turn}`,
+            runId: this.runId,
+            kind: 'model.response',
+            actor: 'model',
+            payload: {
+              text,
+              toolCalls: toolCalls.map(call => ({ name: call.name, input: call.input })),
+              ...(usage ? { usage } : {}),
+              ...(stopReason ? { stopReason } : {}),
+            },
+          });
+        },
+        onEvent: event => {
+          if (event.type === 'tool-call') {
+            events.tryAppend({
+              sessionId: this.threadId,
+              turnId: this.turnId,
+              runId: this.runId,
+              kind: 'tool.call',
+              actor: 'model',
+              payload: { name: event.name, input: event.input },
+            });
+          } else if (event.type === 'tool-result') {
+            events.tryAppend({
+              sessionId: this.threadId,
+              turnId: this.turnId,
+              runId: this.runId,
+              kind: 'tool.result',
+              actor: 'tool',
+              payload: {
+                name: event.name,
+                content: event.content,
+                ...(event.uncertain ? { uncertain: event.uncertain } : {}),
+              },
+            });
+          }
+        },
         onToolExecuted: () => {
           this.toolExecuted = true;
         },
@@ -229,6 +316,53 @@ export class AnpTurnSession implements SessionTask {
         result.status = loop.status;
         result.error = loop.error;
       }
+
+      if (loop.finished?.remember && loop.finished.remember.length > 0) {
+        for (const item of loop.finished.remember) {
+          try {
+            this.runtime.memory.write({
+              agentId: this.runtime.agentId,
+              key: item.key,
+              content: item.content,
+              ...(item.kind ? { kind: item.kind } : {}),
+              ...(item.tags ? { tags: item.tags } : {}),
+              sourceSessionId: this.threadId,
+              sourceTurnId: this.turnId,
+              sourceEventSeq: events.lastSeq(this.threadId),
+              actor: 'agent',
+            });
+            events.tryAppend({
+              sessionId: this.threadId,
+              turnId: this.turnId,
+              runId: this.runId,
+              kind: 'memory.written',
+              actor: 'agent',
+              payload: { key: item.key },
+            });
+          } catch (error) {
+            this.log('warn', `记忆 ${item.key} 写入失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+      events.tryAppend({
+        sessionId: this.threadId,
+        turnId: this.turnId,
+        runId: this.runId,
+        kind: 'turn.end',
+        actor: 'system',
+        payload: {
+          status: result.status,
+          ...(result.error ? { error: result.error } : {}),
+          ...(loop.finished ? { summary: loop.finished.summary, outcome: loop.finished.outcome } : {}),
+          turns: result.turns,
+        },
+      });
+      index.recordTurn({
+        sessionId: this.threadId,
+        turnId: this.turnId,
+        status: result.status,
+        summary: loop.finished?.summary ?? result.error,
+      });
 
       if (loop.finished) {
         result.summary = loop.finished.summary;
@@ -303,7 +437,7 @@ export class AnpTurnSession implements SessionTask {
 
   private availableTools(): EmbeddedTool[] {
     if (this.toolFactory) return this.definition.tools;
-    return this.definition.tools.filter(tool => isLocalTool(tool));
+    return this.definition.tools.filter(tool => isLocalTool(tool) || isEngineTool(tool));
   }
 
   /** 工具层日志只有 info/warn 两档；插件层可能给 debug/error，这里折叠。 */
@@ -330,6 +464,14 @@ export class AnpTurnSession implements SessionTask {
       definition: this.definition,
       tools: this.availableTools(),
       log: () => undefined,
+      memory: this.runtime.memory,
+      events: this.runtime.sessionLog,
+      sessionIndex: this.runtime.sessionIndex,
+      experience: this.runtime.experience,
+      agentId: this.runtime.agentId,
+      sessionId: this.threadId,
+      turnId: this.turnId,
+      taskId: this.pulled.find(item => item.ref.taskId)?.ref.taskId ?? null,
     });
   }
 

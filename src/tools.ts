@@ -9,6 +9,13 @@
 import { CollabError } from './client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from './definition.ts';
 import type { ToolCall, ToolSpec } from './brains/types.ts';
+import type { ExperienceClient } from './experience/client.ts';
+import { parseKnowledgeReference } from './experience/client.ts';
+import type { MemoryStore } from './memory/store.ts';
+import { MEMORY_KINDS, type Memory } from './memory/store.ts';
+import { evidenceLevel } from './memory/text.ts';
+import type { SessionEventLog } from './session/events.ts';
+import type { SessionIndex } from './session/index.ts';
 import type { ToolBackend } from './runtime/transport.ts';
 import { ANP_TOOL_SPECS } from './tools/anp.ts';
 import { NET_TOOL_SPECS } from './tools/net.ts';
@@ -42,10 +49,17 @@ export type LocalToolExecutor = {
   listFiles(relative: string): Promise<Array<{ name: string; type: 'dir' | 'file' | 'link' }>>;
 };
 
+export type RememberItem = {
+  key: string;
+  content: string;
+  kind?: 'fact' | 'preference' | 'decision' | 'procedure' | 'episode';
+  tags?: string[];
+};
+
 export type ToolExecution = {
   content: string;
   /** finish 工具被调用时返回，运行时据此结束本轮。 */
-  finish?: { summary: string; outcome: string };
+  finish?: { summary: string; outcome: string; remember?: RememberItem[] };
   /** 写请求结果未知：本轮必须以 outcome_unknown 结束。 */
   uncertain?: string;
 };
@@ -63,6 +77,15 @@ export type ToolOptions = {
   /** 本地原语的执行位置；缺省在当前进程的 runDir 内。 */
   local?: LocalToolExecutor;
   log: ToolLog;
+  /** 记忆/会话/团队经验；由三个入口统一注入。 */
+  memory?: MemoryStore;
+  events?: SessionEventLog;
+  sessionIndex?: SessionIndex;
+  experience?: ExperienceClient;
+  agentId?: string;
+  sessionId?: string;
+  turnId?: string;
+  taskId?: string | null;
 };
 
 type Schema = Record<string, unknown>;
@@ -175,11 +198,72 @@ export const TOOL_SPECS: Record<EmbeddedTool, ToolSpec> = {
   },
   knowledge_search: {
     name: 'knowledge_search',
-    description: '在公司知识库里检索，返回带版本的条目摘要与正文片段。',
+    description: '在公司知识库里检索，返回带版本、证据等级与有效期的团队经验条目。',
     parameters: schema({
       query: { type: 'string' },
-      limit: { type: 'integer', description: '可选，默认 10，最多 50' },
+      limit: { type: 'integer', description: '可选，默认 10，最多 20' },
     }, ['query']),
+  },
+  knowledge_get: {
+    name: 'knowledge_get',
+    description: '按 reference（knowledge:<id>:<version>）读取一条团队经验的正文与适用条件。',
+    parameters: schema({
+      reference: { type: 'string', description: 'knowledge:<id>:<version>' },
+    }),
+  },
+  knowledge_cite: {
+    name: 'knowledge_cite',
+    description: '把一条团队经验引用到当前任务；任务上下文里会记录版本。',
+    parameters: schema({
+      reference: { type: 'string', description: 'knowledge:<id>:<version>' },
+      taskId: { type: 'string', description: '可选，默认使用当前任务' },
+    }),
+  },
+  knowledge_contribute: {
+    name: 'knowledge_contribute',
+    description: '把本轮可复用的经验提交为团队经验候选；只生成 candidate，必须由人审核发布。',
+    parameters: schema({
+      taskId: { type: 'string', description: '已完成或已验收的任务 id' },
+      content: { type: 'string', description: '可复用的经验正文' },
+      title: { type: 'string' },
+      summary: { type: 'string' },
+      conditions: { type: 'string', description: '适用条件' },
+      kind: { type: 'string', enum: ['experience', 'checklist', 'decision', 'playbook'] },
+      tags: { type: 'array', items: { type: 'string' } },
+    }, ['taskId', 'content']),
+  },
+  memory_search: {
+    name: 'memory_search',
+    description: '检索自己的长期记忆；返回带证据等级的条目。省略 query 时列出最近的记忆。',
+    parameters: schema({
+      query: { type: 'string' },
+      kind: { type: 'string', enum: MEMORY_KINDS },
+      limit: { type: 'integer', description: '默认 10，最多 20' },
+    }, []),
+  },
+  memory_forget: {
+    name: 'memory_forget',
+    description: '软删除一条长期记忆；历史 revision 保留。置顶记忆需要先取消置顶。',
+    parameters: schema({
+      key: { type: 'string' },
+      reason: { type: 'string' },
+    }),
+  },
+  session_search: {
+    name: 'session_search',
+    description: '跨会话搜索过去的摘要；只返回摘要片段，不返回其他会话的完整事件。',
+    parameters: schema({
+      query: { type: 'string' },
+      limit: { type: 'integer', description: '默认 10，最多 20' },
+    }, ['query']),
+  },
+  session_peek: {
+    name: 'session_peek',
+    description: '查看某个会话最近的事件（脱敏，最多 20 条），用于确认当时发生了什么。',
+    parameters: schema({
+      sessionId: { type: 'string' },
+      limit: { type: 'integer', description: '默认 20，最多 20' },
+    }, ['sessionId']),
   },
   shell: {
     name: 'shell',
@@ -209,13 +293,29 @@ export const TOOL_SPECS: Record<EmbeddedTool, ToolSpec> = {
   },
   finish: {
     name: 'finish',
-    description: '结束本轮。调用前应已经把该做的提交、留言做完。',
+    description: '结束本轮。调用前应已经把该做的提交、留言做完。可选地留下最多 3 条长期记忆。',
     parameters: schema({
       summary: { type: 'string', description: '这一轮做了什么，一到三句话' },
       outcome: {
         type: 'string',
         enum: ['done', 'nothing_to_do', 'blocked'],
         description: 'done=处理完毕；nothing_to_do=消息不需要行动；blocked=需要人参与',
+      },
+      remember: {
+        type: 'array',
+        maxItems: 3,
+        description: '可选：最多 3 条值得跨会话保留的判断，每条不超过 1000 字符',
+        items: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', description: '稳定的记忆键，例如 project.test-command' },
+            content: { type: 'string', description: '一条可复用的判断' },
+            kind: { type: 'string', enum: MEMORY_KINDS },
+            tags: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['key', 'content'],
+          additionalProperties: false,
+        },
       },
     }, ['summary']),
   },
@@ -255,6 +355,64 @@ function safeName(name: string): string {
   return cleaned.slice(0, 120) || 'download.bin';
 }
 
+function memoryView(row: Memory): Record<string, unknown> {
+  return {
+    key: row.key,
+    kind: row.kind,
+    maturity: row.maturity,
+    evidence: evidenceLevel(row.maturity),
+    confidence: Number(row.confidence.toFixed(2)),
+    content: row.content,
+    tags: row.tags,
+    pinned: row.pinned,
+    ...(row.conditions ? { conditions: row.conditions } : {}),
+    sourceSessionId: row.source_session_id,
+    useCount: row.use_count,
+    successCount: row.success_count,
+    updatedAt: row.updated_at,
+    ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
+  };
+}
+
+function compactPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (typeof value === 'string') {
+      out[key] = value.length > 300 ? `${value.slice(0, 300)}…` : value;
+    } else if (Array.isArray(value)) {
+      out[key] = value.slice(0, 5);
+    } else if (value && typeof value === 'object') {
+      out[key] = '[object]';
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function rememberOf(input: Record<string, unknown>): RememberItem[] | undefined {
+  if (!Array.isArray(input.remember)) return undefined;
+  const items: RememberItem[] = [];
+  for (const raw of input.remember.slice(0, 3)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const record = raw as Record<string, unknown>;
+    if (typeof record.key !== 'string' || typeof record.content !== 'string') continue;
+    const kind = typeof record.kind === 'string' && (MEMORY_KINDS as readonly string[]).includes(record.kind)
+      ? (record.kind as RememberItem['kind'])
+      : undefined;
+    const tags = Array.isArray(record.tags)
+      ? record.tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 12)
+      : undefined;
+    items.push({
+      key: record.key.slice(0, 64),
+      content: record.content.slice(0, 2_000),
+      ...(kind ? { kind } : {}),
+      ...(tags && tags.length > 0 ? { tags } : {}),
+    });
+  }
+  return items.length > 0 ? items : undefined;
+}
+
 export function createTools(options: ToolOptions) {
   const { backend, runDir, runId, definition, log } = options;
   const enabledTools = options.tools ?? definition.tools;
@@ -270,6 +428,18 @@ export function createTools(options: ToolOptions) {
   const platform = (): ToolBackend => {
     if (!backend) throw new Error('当前运行环境没有平台工具后端');
     return backend;
+  };
+
+  const memoryStore = (): { memory: MemoryStore; agentId: string } => {
+    if (!options.memory) throw new Error('当前运行环境没有记忆存储');
+    const agentId = options.agentId ?? options.sessionId;
+    if (!agentId) throw new Error('当前运行环境缺少 agentId，无法读写记忆');
+    return { memory: options.memory, agentId };
+  };
+
+  const sourceSeq = (): number | undefined => {
+    if (!options.events || !options.sessionId) return undefined;
+    return options.events.lastSeq(options.sessionId);
   };
 
   const operation = (call: ToolCall, suffix = '') => `run:${runId}:${call.id}${suffix ? `:${suffix}` : ''}`;
@@ -395,8 +565,204 @@ export function createTools(options: ToolOptions) {
         case 'knowledge_search': {
           const limit = input.limit === undefined ? 10 : Number(input.limit);
           if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('limit 必须是 1..50 的整数');
-          const found = await platform().searchKnowledge(textOf(input, 'query', 500), limit);
+          const query = textOf(input, 'query', 500);
+          if (options.experience) {
+            const found = await options.experience.search(query, { limit });
+            return {
+              content: render({
+                items: found.items.map(item => ({
+                  reference: item.reference,
+                  id: item.id,
+                  version: item.version,
+                  title: item.title,
+                  summary: item.summary,
+                  conditions: item.conditions,
+                  kind: item.kind,
+                  evidence: item.evidence,
+                  state: item.state,
+                  expiresAt: item.expiresAt,
+                  reviewerId: item.reviewerId,
+                  stale: item.stale,
+                  cachedAt: item.cachedAt,
+                })),
+                degraded: found.degraded,
+                note: found.note,
+                fetchedAt: found.fetchedAt,
+              }),
+            };
+          }
+          const found = await platform().searchKnowledge(query, limit);
           return { content: render(found) };
+        }
+        case 'knowledge_get': {
+          if (!options.experience) throw new Error('当前运行环境没有团队经验缓存');
+          const parsed = parseKnowledgeReference({ reference: textOf(input, 'reference', 200) });
+          if (!parsed) throw new Error('reference 必须是 knowledge:<id>:<version>');
+          const entry = await options.experience.get(parsed.id, parsed.version);
+          if (!entry) {
+            return {
+              content: render({
+                found: false,
+                note: '没有可用的团队经验：可能已撤销、已过期，或当前平台不可用且无缓存。不要编造。',
+              }),
+            };
+          }
+          return { content: render({ found: true, ...entry }) };
+        }
+        case 'knowledge_cite': {
+          if (!options.experience) throw new Error('当前运行环境没有团队经验缓存');
+          if (!options.sessionId || !options.turnId) throw new Error('缺少会话上下文，无法记录引用');
+          const parsed = parseKnowledgeReference({ reference: textOf(input, 'reference', 200) });
+          if (!parsed) throw new Error('reference 必须是 knowledge:<id>:<version>');
+          const taskId = typeof input.taskId === 'string' ? input.taskId : options.taskId ?? undefined;
+          const cited = await options.experience.cite({
+            knowledgeId: parsed.id,
+            version: parsed.version,
+            sessionId: options.sessionId,
+            turnId: options.turnId,
+            taskId: taskId ?? null,
+          });
+          options.events?.tryAppend({
+            sessionId: options.sessionId,
+            turnId: options.turnId,
+            kind: 'knowledge.cited',
+            payload: {
+              reference: cited.reference,
+              cited: cited.cited,
+              taskId: taskId ?? null,
+              ...(cited.error ? { error: cited.error } : {}),
+            },
+          });
+          return { content: render(cited) };
+        }
+        case 'knowledge_contribute': {
+          if (!options.experience) throw new Error('当前运行环境没有团队经验缓存');
+          const result = await options.experience.contribute({
+            taskId: textOf(input, 'taskId', 128),
+            knowledge: {
+              content: textOf(input, 'content', 8_000),
+              ...(typeof input.title === 'string' ? { title: input.title.slice(0, 200) } : {}),
+              ...(typeof input.summary === 'string' ? { summary: input.summary.slice(0, 500) } : {}),
+              ...(typeof input.conditions === 'string' ? { conditions: input.conditions.slice(0, 500) } : {}),
+              ...(typeof input.kind === 'string' ? { kind: input.kind } : {}),
+              ...(Array.isArray(input.tags)
+                ? { tags: input.tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 12) }
+                : {}),
+            },
+          });
+          return {
+            content: render({
+              ok: result.ok,
+              ...(result.candidate ? { candidate: result.candidate } : {}),
+              ...(result.error ? { error: result.error } : {}),
+              note: result.ok
+                ? '已提交团队经验候选；它需要人工审核后才能发布。'
+                : '候选提交失败；不要重试发布或撤销。',
+            }),
+          };
+        }
+        case 'memory_search': {
+          const { memory, agentId } = memoryStore();
+          const limit = input.limit === undefined ? 10 : Number(input.limit);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('limit 必须是 1..20 的整数');
+          const query = typeof input.query === 'string' ? input.query : '';
+          if (query.trim()) {
+            const hits = memory.search(agentId, query, { limit });
+            return { content: render(hits.map(hit => ({ score: hit.score, ...memoryView(hit.memory) }))) };
+          }
+          const kind = typeof input.kind === 'string' ? input.kind : undefined;
+          const rows = memory.list(agentId, {
+            limit,
+            ...(kind && (MEMORY_KINDS as readonly string[]).includes(kind)
+              ? { kind: kind as (typeof MEMORY_KINDS)[number] }
+              : {}),
+          });
+          return { content: render(rows.map(memoryView)) };
+        }
+        case 'memory_get': {
+          const { memory, agentId } = memoryStore();
+          const key = textOf(input, 'key', 256);
+          const row = memory.getByKey(agentId, key, { includeArchived: true });
+          return { content: render(row ? { ...memoryView(row), revisions: memory.revisions(row.id, 5) } : { key, value: null }) };
+        }
+        case 'memory_set': {
+          const { memory, agentId } = memoryStore();
+          const key = textOf(input, 'key', 256);
+          const content = typeof input.content === 'string'
+            ? input.content
+            : typeof input.value === 'string'
+              ? input.value
+              : JSON.stringify(input.value ?? '');
+          const kind = typeof input.kind === 'string' ? input.kind : undefined;
+          const result = memory.write({
+            agentId,
+            key,
+            content,
+            ...(kind && (MEMORY_KINDS as readonly string[]).includes(kind)
+              ? { kind: kind as (typeof MEMORY_KINDS)[number] }
+              : {}),
+            ...(Array.isArray(input.tags)
+              ? { tags: input.tags.filter((tag): tag is string => typeof tag === 'string') }
+              : {}),
+            ...(typeof input.conditions === 'string' ? { conditions: input.conditions } : {}),
+            sourceSessionId: options.sessionId ?? 'tool',
+            sourceTurnId: options.turnId ?? null,
+            sourceEventSeq: sourceSeq() ?? null,
+            actor: 'agent',
+          });
+          options.events?.tryAppend({
+            sessionId: options.sessionId ?? 'tool',
+            turnId: options.turnId ?? null,
+            kind: 'memory.written',
+            payload: { key: result.memory.key, created: result.created, sourceEventSeq: sourceSeq() ?? null },
+          });
+          return {
+            content: render({
+              saved: true,
+              unchanged: result.unchanged,
+              key: result.memory.key,
+              maturity: result.memory.maturity,
+            }),
+          };
+        }
+        case 'memory_forget': {
+          const { memory, agentId } = memoryStore();
+          const key = textOf(input, 'key', 256);
+          const reason = typeof input.reason === 'string' ? input.reason.slice(0, 200) : 'agent 主动遗忘';
+          try {
+            const archived = memory.archive(agentId, key, reason, 'agent');
+            return { content: render({ archived, key }) };
+          } catch (error) {
+            return { content: `无法删除 ${key}：${error instanceof Error ? error.message : String(error)}` };
+          }
+        }
+        case 'session_search': {
+          if (!options.sessionIndex) throw new Error('当前运行环境没有会话索引');
+          const limit = input.limit === undefined ? 10 : Number(input.limit);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('limit 必须是 1..20 的整数');
+          const hits = options.sessionIndex.search(textOf(input, 'query', 500), { limit });
+          return {
+            content: render({
+              sessions: hits,
+              note: '这些是会话摘要；需要细节时用 session_peek 查看脱敏事件。',
+            }),
+          };
+        }
+        case 'session_peek': {
+          if (!options.events) throw new Error('当前运行环境没有会话事件日志');
+          const sessionId = textOf(input, 'sessionId', 200);
+          const limit = input.limit === undefined ? 20 : Number(input.limit);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('limit 必须是 1..20 的整数');
+          const all = options.events.read(sessionId, { limit: 1000 });
+          const events = all.slice(-limit).map(event => ({
+            seq: event.seq,
+            kind: event.kind,
+            turnId: event.turn_id,
+            actor: event.actor,
+            at: event.at,
+            payload: compactPayload(event.payload),
+          }));
+          return { content: render({ sessionId, events }) };
         }
         case 'shell': {
           if (!definition.sandbox.shell) throw new Error('这一轮没有开启 shell');
@@ -431,6 +797,7 @@ export function createTools(options: ToolOptions) {
             finish: {
               summary: textOf(input, 'summary', 2_000),
               outcome: typeof input.outcome === 'string' ? input.outcome : 'done',
+              ...(rememberOf(input) ? { remember: rememberOf(input) } : {}),
             },
           };
         case 'anp_send':
@@ -444,8 +811,6 @@ export function createTools(options: ToolOptions) {
         case 'schedule_cancel':
         case 'list_schedules':
         case 'http_fetch':
-        case 'memory_get':
-        case 'memory_set':
         case 'finish_turn':
           return { content: `工具 ${call.name} 只在 router 常驻模式下可用` };
         default:

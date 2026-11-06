@@ -13,13 +13,13 @@ import type { MessageSource } from '../threads/types.ts';
 import { AgentStore } from '../store/agent-store.ts';
 import { StdinSource } from '../sources/stdin.ts';
 import { PlatformSource } from '../sources/platform.ts';
-import { isLocalTool, type EmbeddedAgentDefinition } from '../definition.ts';
+import { isEngineTool, isLocalTool, type EmbeddedAgentDefinition } from '../definition.ts';
 import { loadAgentFile, StandaloneConfigError, type LoadedAgentFile } from '../standalone/config.ts';
 import { mergePlugins, pluginDefinitionsFromCli } from '../plugins/cli-spec.ts';
 import type { PluginDefinition, PluginPreparation } from '../plugins/types.ts';
 import type { ToolLog } from '../tools.ts';
 import type { SessionOutcome } from '../runtime/types.ts';
-import { ChatRenderer, Repl, type ReplPluginControl } from './repl.ts';
+import { ChatRenderer, Repl, type ReplMemoryControl, type ReplPluginControl } from './repl.ts';
 
 type CliOptions = {
   agent?: string;
@@ -164,7 +164,7 @@ function buildPlatform(
 
 function validateTools(definition: EmbeddedAgentDefinition, platform: PlatformSource | null): void {
   if (platform) return;
-  const missing = definition.tools.filter(tool => !isLocalTool(tool));
+  const missing = definition.tools.filter(tool => !isLocalTool(tool) && !isEngineTool(tool));
   if (missing.length > 0) {
     throw new StandaloneConfigError(
       `没有平台工具后端，定义里的这些工具不可用：${missing.join(', ')}`
@@ -235,6 +235,122 @@ async function removePlugin(runtime: AgentRuntime, id: string): Promise<string> 
   }`;
 }
 
+function memoryLine(row: {
+  key: string;
+  kind: string;
+  maturity: string;
+  pinned: boolean;
+  content: string;
+}): string {
+  const flags = [row.kind, row.maturity, ...(row.pinned ? ['置顶'] : [])].join('/');
+  const first = row.content.trim().split('\n')[0] ?? '';
+  return `  ${row.key}  [${flags}]  ${first.length > 100 ? `${first.slice(0, 100)}…` : first}`;
+}
+
+function sessionLine(row: {
+  session_id: string;
+  kind: string;
+  title: string | null;
+  turn_count: number;
+  last_at: string;
+  last_summary: string | null;
+}): string {
+  const title = row.title ?? '(无标题)';
+  const summary = row.last_summary ? `  ${row.last_summary.slice(0, 80)}` : '';
+  return `  ${row.session_id}  [${row.kind}] ${title}  ${row.turn_count} 轮 ${row.last_at}${summary}`;
+}
+
+async function memoryCommand(runtime: AgentRuntime, rest: string): Promise<string> {
+  const parts = rest.trim().split(/\s+/).filter(Boolean);
+  const [scope = '', verb = '', ...tail] = parts;
+  const argument = tail.join(' ');
+  const agentId = runtime.agentId;
+  const memory = runtime.memory;
+
+  if (scope === 'session' || scope === 'sessions') {
+    const index = runtime.sessionIndex;
+    if (verb === '' || verb === 'list') {
+      const rows = index.list({ limit: 20 });
+      return rows.length === 0 ? '还没有会话记录。' : `会话（最近 ${rows.length} 个）：\n${rows.map(sessionLine).join('\n')}`;
+    }
+    if (verb === 'search') {
+      if (!argument) throw new Error('用法：/session search <词>');
+      const hits = index.search(argument, { limit: 10 });
+      if (hits.length === 0) return `没有匹配“${argument}”的会话。`;
+      return hits.map(hit =>
+        `  ${hit.sessionId}  [${hit.kind}] ${hit.title ?? '(无标题)'}  得分 ${hit.score.toFixed(2)}\n`
+        + hit.matches.map(match => `    ${match.at}  ${match.summary}`).join('\n'),
+      ).join('\n');
+    }
+    if (verb === 'get') {
+      if (!argument) throw new Error('用法：/session get <id>');
+      const row = index.get(argument);
+      if (!row) return `没有会话 ${argument}。`;
+      return sessionLine(row);
+    }
+    throw new Error(`未知的会话命令 ${verb}（list / search <词> / get <id>）`);
+  }
+
+  if (scope !== 'memory' && scope !== 'mem') {
+    throw new Error('用法：/memory [list|search <词>|set <key> <内容>|forget <key>|pin <key>|unpin <key>|stats]');
+  }
+
+  switch (verb) {
+    case '':
+    case 'list': {
+      const rows = memory.list(agentId, { limit: 50 });
+      if (rows.length === 0) return '还没有长期记忆。';
+      return `长期记忆（${rows.length} 条）：\n${rows.map(memoryLine).join('\n')}`;
+    }
+    case 'search': {
+      if (!argument) throw new Error('用法：/memory search <词>');
+      const hits = memory.search(agentId, argument, { limit: 10, includeEpisodes: true });
+      if (hits.length === 0) return `没有匹配“${argument}”的记忆。`;
+      return hits.map(hit => `${memoryLine(hit.memory)}  得分 ${hit.score.toFixed(2)}`).join('\n');
+    }
+    case 'get': {
+      if (!argument) throw new Error('用法：/memory get <key>');
+      const row = memory.getByKey(agentId, argument, { includeArchived: true });
+      if (!row) return `没有记忆 ${argument}。`;
+      return `${memoryLine(row)}\n\n${row.content}`;
+    }
+    case 'set': {
+      const key = tail[0] ?? '';
+      const content = tail.slice(1).join(' ');
+      if (!key || !content) throw new Error('用法：/memory set <key> <内容>');
+      const existing = memory.getByKey(agentId, key);
+      const result = existing
+        ? memory.correct(agentId, key, content)
+        : memory.write({ agentId, key, content, sourceSessionId: 'human', actor: 'human', reason: '人工写入' });
+      return result.unchanged ? `记忆 ${key} 没有变化。` : `已写入记忆 ${key}。`;
+    }
+    case 'forget':
+    case 'archive':
+      if (!argument) throw new Error('用法：/memory forget <key>');
+      return memory.archive(agentId, argument) ? `已遗忘 ${argument}。` : `没有记忆 ${argument}。`;
+    case 'pin':
+    case 'unpin': {
+      if (!argument) throw new Error(`用法：/memory ${verb} <key>`);
+      memory.setPinned(agentId, argument, verb === 'pin');
+      return `已${verb === 'pin' ? '置顶' : '取消置顶'} ${argument}。`;
+    }
+    case 'stats': {
+      const stats = memory.stats(agentId);
+      const kinds = Object.entries(stats.byKind).map(([kind, count]) => `${kind} ${count}`).join('、') || '无';
+      const maturity = Object.entries(stats.byMaturity).map(([level, count]) => `${level} ${count}`).join('、');
+      return [
+        `记忆 ${stats.total} 条（活跃 ${stats.active}，归档 ${stats.archived}，置顶 ${stats.pinned}）`,
+        `证据：${maturity}`,
+        `类型：${kinds}`,
+        `被引用 ${stats.citations} 次，共 ${stats.bytes} 字节`,
+        `最近写入：${stats.lastWriteAt ?? '无'}`,
+      ].join('\n');
+    }
+    default:
+      throw new Error(`未知的记忆命令 ${verb}（list / search / get / set / forget / pin / unpin / stats）`);
+  }
+}
+
 async function main(argv: string[]): Promise<number> {
   const options = parseArgs(argv);
   if (options.help) {
@@ -297,6 +413,10 @@ async function main(argv: string[]): Promise<number> {
     remove: id => removePlugin(runtime, id),
   };
 
+  const memoryControl: ReplMemoryControl = {
+    command: rest => memoryCommand(runtime, rest),
+  };
+
   const renderer = new ChatRenderer({ interactive: Boolean(process.stdin.isTTY) && !options.message });
   let repl: Repl | null = null;
 
@@ -335,7 +455,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     if (!stdin) throw new StandaloneConfigError('没有可交互的输入来源');
-    repl = new Repl({ host, stdin, plugins: pluginControl });
+    repl = new Repl({ host, stdin, plugins: pluginControl, memory: memoryControl });
     await repl.run(Boolean(process.stdin.isTTY));
     return 0;
   } finally {

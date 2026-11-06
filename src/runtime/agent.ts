@@ -6,14 +6,22 @@
  * `concurrency` 决定同一 agent 能同时开多少个 Session。
  */
 
+import { join } from 'node:path';
 import { brainFor } from '../brains/index.ts';
 import type { Brain, ToolSpec } from '../brains/types.ts';
 import { CollabClient } from '../client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool, SessionIsolation } from '../definition.ts';
+import { ExperienceClient } from '../experience/client.ts';
+import { KnowledgeCache } from '../experience/cache.ts';
+import { MemoryStore } from '../memory/store.ts';
 import { parsePlugins } from '../plugins/config.ts';
 import { PluginRegistry } from '../plugins/registry.ts';
 import type { PluginDefinition, PluginPreparation } from '../plugins/types.ts';
 import { ensureAgentRoot } from '../sandbox.ts';
+import { SessionEventLog } from '../session/events.ts';
+import { SessionIndex } from '../session/index.ts';
+import { SqliteDb } from '../store/sqlite.ts';
+import { ensureMemorySchema } from '../store/memory-schema.ts';
 import { createTools, type ToolLog } from '../tools.ts';
 import { ProcessSession } from './process-session.ts';
 import { AgentSession } from './session.ts';
@@ -58,6 +66,12 @@ export class AgentRuntime {
   private specsCache: ToolSpec[] | null = null;
   private pluginRegistry: PluginRegistry | null = null;
   private pluginPreparation: Promise<PluginPreparation> | null = null;
+  private memoryDb: SqliteDb | null = null;
+  private memoryStore: MemoryStore | null = null;
+  private eventLog: SessionEventLog | null = null;
+  private index: SessionIndex | null = null;
+  private cache: KnowledgeCache | null = null;
+  private experienceClient: ExperienceClient | null = null;
   private running = 0;
   private presence = 0;
   private readonly waiters: Array<() => void> = [];
@@ -94,6 +108,40 @@ export class AgentRuntime {
   /** 定义里声明、且当前传输层确实能提供的工具。 */
   get tools(): EmbeddedTool[] {
     return this.definition.tools.filter(tool => this.transport.supportsTool(tool));
+  }
+
+  /** agent 级的本地数据库；会话事件、记忆与经验缓存共用。 */
+  get store(): SqliteDb {
+    if (!this.memoryDb) {
+      this.memoryDb = new SqliteDb(join(this.root, 'agent.db'));
+      ensureMemorySchema(this.memoryDb);
+    }
+    return this.memoryDb;
+  }
+
+  get memory(): MemoryStore {
+    if (!this.memoryStore) {
+      this.memoryStore = new MemoryStore(this.store, { agentId: this.agentId, migrateNotes: true });
+    }
+    return this.memoryStore;
+  }
+
+  get sessionLog(): SessionEventLog {
+    if (!this.eventLog) this.eventLog = new SessionEventLog(this.store);
+    return this.eventLog;
+  }
+
+  get sessionIndex(): SessionIndex {
+    if (!this.index) this.index = new SessionIndex(this.store);
+    return this.index;
+  }
+
+  get experience(): ExperienceClient {
+    if (!this.experienceClient) {
+      this.cache = new KnowledgeCache(this.store);
+      this.experienceClient = new ExperienceClient(this.transport.tools, this.cache);
+    }
+    return this.experienceClient;
   }
 
   /** 定义里声明、但当前传输层无法提供的工具。 */
@@ -221,12 +269,20 @@ export class AgentRuntime {
     return promise;
   }
 
-  /** 统一收尾：关闭插件进程。幂等，可以重复调用。 */
+  /** 统一收尾：关闭插件进程与本地数据库。幂等，可以重复调用。 */
   async close(): Promise<void> {
     const registry = this.pluginRegistry;
     this.pluginRegistry = null;
     this.pluginPreparation = null;
     await registry?.closeAll();
+    this.memoryStore = null;
+    this.eventLog = null;
+    this.index = null;
+    this.experienceClient = null;
+    this.cache = null;
+    const db = this.memoryDb;
+    this.memoryDb = null;
+    db?.close();
   }
 
   get activeSessions(): number {

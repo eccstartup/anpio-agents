@@ -13,7 +13,9 @@ import type { AgentRuntime } from '../runtime/agent.ts';
 import type { SessionResult } from '../runtime/types.ts';
 import type { ToolBackend } from '../runtime/transport.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from '../definition.ts';
-import { isLocalTool } from '../definition.ts';
+import { isEngineTool, isLocalTool } from '../definition.ts';
+import { ContextAssembler } from '../runtime/context.ts';
+import { modelRequestPayload } from '../session/events.ts';
 import { createTools } from '../tools.ts';
 import { withPlugins } from '../plugins/tools.ts';
 import type { AgentStore, InboxRow } from '../store/agent-store.ts';
@@ -121,6 +123,22 @@ export class ThreadTurn {
       });
       this.emit({ type: 'turn-start', threadId: this.threadId, turnId: this.turnId, sourceId: this.sourceId });
 
+      const events = this.runtime.sessionLog;
+      const index = this.runtime.sessionIndex;
+      events.tryAppend({
+        sessionId: this.threadId,
+        turnId: this.turnId,
+        runId: this.runId,
+        kind: 'session.start',
+        actor: 'system',
+        payload: { agentId: this.runtime.agentId, definitionId: this.definition.id, title: this.definition.name },
+      });
+      index.ensure({
+        sessionId: this.threadId,
+        kind: 'thread',
+        title: firstString(rows, 'title') || this.definition.name,
+      });
+
       const primarySource = this.sources.get(primary.source);
       handle = primarySource?.beginTurn ? await primarySource.beginTurn(this.inboundFrom(primary)) : null;
 
@@ -161,6 +179,14 @@ export class ThreadTurn {
           definition: this.definition,
           tools: available,
           log: toolLog,
+          memory: this.runtime.memory,
+          events,
+          sessionIndex: index,
+          experience: this.runtime.experience,
+          agentId: this.runtime.agentId,
+          sessionId: this.threadId,
+          turnId: this.turnId,
+          taskId: firstString(rows, 'taskId') || null,
         }),
         this.runtime.plugins,
         {
@@ -205,8 +231,79 @@ export class ThreadTurn {
         },
         heartbeat: async () => this.renewLeases(rows, leaseSeconds),
         stream: this.stream,
+        contextProvider: async ({ turn, messages: current }) => {
+          const assembler = new ContextAssembler({
+            agentId: this.runtime.agentId,
+            sessionId: this.threadId,
+            turnId: `${this.turnId}:t${turn}`,
+            baseSystem: system,
+            memory: this.runtime.memory,
+            experience: this.runtime.experience,
+            events,
+            db: this.runtime.store,
+            scopeHint: this.threadId,
+            taskId: firstString(rows, 'taskId') || null,
+          });
+          const assembled = await assembler.assemble({
+            messages: current,
+            extraQuery: [this.definition.name, this.definition.description].filter(Boolean),
+          });
+          return { system: assembled.system };
+        },
+        onModelRequest: ({ turn, system: currentSystem, messages: current, tools: specs }) => {
+          events.tryAppend({
+            sessionId: this.threadId,
+            turnId: `${this.turnId}:t${turn}`,
+            runId: this.runId,
+            kind: 'model.request',
+            actor: 'system',
+            payload: modelRequestPayload({
+              system: currentSystem,
+              messages: current,
+              tools: specs.map(spec => spec.name),
+            }),
+          });
+        },
+        onModelResponse: ({ turn, text, toolCalls, usage, stopReason }) => {
+          events.tryAppend({
+            sessionId: this.threadId,
+            turnId: `${this.turnId}:t${turn}`,
+            runId: this.runId,
+            kind: 'model.response',
+            actor: 'model',
+            payload: {
+              text,
+              toolCalls: toolCalls.map(call => ({ name: call.name, input: call.input })),
+              ...(usage ? { usage } : {}),
+              ...(stopReason ? { stopReason } : {}),
+            },
+          });
+        },
         onEvent: event => {
           this.emit({ ...event, threadId: this.threadId, turnId: this.turnId, sourceId: this.sourceId });
+          if (event.type === 'tool-call') {
+            events.tryAppend({
+              sessionId: this.threadId,
+              turnId: this.turnId,
+              runId: this.runId,
+              kind: 'tool.call',
+              actor: 'model',
+              payload: { name: event.name, input: event.input },
+            });
+          } else if (event.type === 'tool-result') {
+            events.tryAppend({
+              sessionId: this.threadId,
+              turnId: this.turnId,
+              runId: this.runId,
+              kind: 'tool.result',
+              actor: 'tool',
+              payload: {
+                name: event.name,
+                content: event.content,
+                ...(event.uncertain ? { uncertain: event.uncertain } : {}),
+              },
+            });
+          }
         },
         onToolExecuted: () => {
           result.toolExecuted = true;
@@ -229,6 +326,53 @@ export class ThreadTurn {
         result.status = loop.status;
         result.error = loop.error;
       }
+
+      if (loop.finished?.remember && loop.finished.remember.length > 0) {
+        for (const item of loop.finished.remember) {
+          try {
+            this.runtime.memory.write({
+              agentId: this.runtime.agentId,
+              key: item.key,
+              content: item.content,
+              ...(item.kind ? { kind: item.kind } : {}),
+              ...(item.tags ? { tags: item.tags } : {}),
+              sourceSessionId: this.threadId,
+              sourceTurnId: this.turnId,
+              sourceEventSeq: events.lastSeq(this.threadId),
+              actor: 'agent',
+            });
+            events.tryAppend({
+              sessionId: this.threadId,
+              turnId: this.turnId,
+              runId: this.runId,
+              kind: 'memory.written',
+              actor: 'agent',
+              payload: { key: item.key },
+            });
+          } catch (error) {
+            this.log('warn', `记忆 ${item.key} 写入失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+      events.tryAppend({
+        sessionId: this.threadId,
+        turnId: this.turnId,
+        runId: this.runId,
+        kind: 'turn.end',
+        actor: 'system',
+        payload: {
+          status: result.status,
+          ...(result.error ? { error: result.error } : {}),
+          ...(loop.finished ? { summary: loop.finished.summary, outcome: loop.finished.outcome } : {}),
+          turns: result.turns,
+        },
+      });
+      index.recordTurn({
+        sessionId: this.threadId,
+        turnId: this.turnId,
+        status: result.status,
+        summary: loop.finished?.summary ?? result.error,
+      });
 
       if (loop.finished) {
         result.summary = loop.finished.summary;
@@ -315,12 +459,12 @@ export class ThreadTurn {
   }
 
   private availableTools(backend: ToolBackend | undefined): EmbeddedTool[] {
-    const missing = this.definition.tools.filter(tool => !isLocalTool(tool));
+    const missing = this.definition.tools.filter(tool => !isLocalTool(tool) && !isEngineTool(tool));
     if (!backend && missing.length > 0 && !this.allowMissingTools) {
       throw new Error(`当前没有平台工具后端，无法提供：${missing.join(', ')}`);
     }
-    const legacyLocal = this.definition.tools.filter(isLocalTool);
-    return backend ? this.definition.tools : legacyLocal;
+    const localAndEngine = this.definition.tools.filter(tool => isLocalTool(tool) || isEngineTool(tool));
+    return backend ? this.definition.tools : localAndEngine;
   }
 
   private environmentFor(rows: LeasedRow[]): EnvironmentDescription {

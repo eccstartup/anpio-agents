@@ -9,6 +9,9 @@
 import type {
   CollabClient,
   InboxItem,
+  KnowledgeCandidate,
+  KnowledgeCandidateInput,
+  KnowledgeEvidence,
   KnowledgeSearch,
   MailEnvelope,
   MailMessage,
@@ -87,6 +90,18 @@ export type ToolBackend = {
     operationId: string,
   ): Promise<SpaceFile>;
   searchKnowledge(query: string, limit?: number, budget?: number): Promise<KnowledgeSearch>;
+  /** 团队经验的按需读取、引用与投稿；不支持的传输层可以省略。 */
+  knowledgeEvidence?(knowledgeId: string): Promise<KnowledgeEvidence>;
+  referenceKnowledge?(
+    taskId: string,
+    knowledgeId: string,
+    operationId: string,
+  ): Promise<{ id: string; version: number }>;
+  createKnowledgeCandidate?(
+    taskId: string,
+    input: KnowledgeCandidateInput,
+    operationId: string,
+  ): Promise<KnowledgeCandidate>;
 };
 
 export type AgentTransport = {

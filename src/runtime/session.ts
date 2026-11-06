@@ -10,7 +10,9 @@ import type { ChatMessage } from '../brains/types.ts';
 import type { MailEnvelope } from '../client.ts';
 import type { CompletionPolicy, EmbeddedAgentDefinition } from '../definition.ts';
 import { createRunDir, keepRunDir, removeRunDir, scrubbedEnv } from '../sandbox.ts';
-import { createTools } from '../tools.ts';
+import { modelRequestPayload } from '../session/events.ts';
+import { ContextAssembler } from './context.ts';
+import { createTools, type RememberItem } from '../tools.ts';
 import { declaredPluginTools } from '../plugins/naming.ts';
 import { withPlugins } from '../plugins/tools.ts';
 import type { AgentRuntime } from './agent.ts';
@@ -98,8 +100,18 @@ export class AgentSession {
     this.log('debug', `子进程环境只有 ${Object.keys(scrubbedEnv(runDir)).join(', ')}`);
 
     const pulled = this.pulled;
-    let finished: { summary: string; outcome: string } | null = null;
+    let finished: { summary: string; outcome: string; remember?: RememberItem[] } | null = null;
     let tools: BrainLoopTools | null = null;
+    const events = this.runtime.sessionLog;
+    const index = this.runtime.sessionIndex;
+    events.tryAppend({
+      sessionId: runId,
+      runId,
+      kind: 'session.start',
+      actor: 'system',
+      payload: { agentId: this.runtime.agentId, definitionId: definition.id, title: definition.name },
+    });
+    index.ensure({ sessionId: runId, kind: 'run', title: definition.name });
 
     const heartbeat = async () => {
       try {
@@ -168,6 +180,14 @@ export class AgentSession {
           definition,
           tools: this.runtime.tools,
           log: this.log,
+          memory: this.runtime.memory,
+          events,
+          sessionIndex: index,
+          experience: this.runtime.experience,
+          agentId: this.runtime.agentId,
+          sessionId: runId,
+          turnId: runId,
+          taskId: taskId ?? null,
         }),
         this.runtime.plugins,
         {
@@ -214,11 +234,108 @@ export class AgentSession {
         signal: this.deadline.signal,
         log: this.log,
         heartbeat,
+        contextProvider: async ({ turn, messages: current }) => {
+          const assembler = new ContextAssembler({
+            agentId: this.runtime.agentId,
+            sessionId: runId,
+            turnId: `${runId}:t${turn}`,
+            baseSystem: system,
+            memory: this.runtime.memory,
+            experience: this.runtime.experience,
+            events,
+            db: this.runtime.store,
+            ...(taskId === undefined ? {} : { taskId }),
+          });
+          const assembled = await assembler.assemble({
+            messages: current,
+            extraQuery: [definition.name, definition.description].filter(Boolean),
+          });
+          return { system: assembled.system };
+        },
+        onModelRequest: ({ turn, system: currentSystem, messages: current, tools: specs }) => {
+          events.tryAppend({
+            sessionId: runId,
+            turnId: `${runId}:t${turn}`,
+            runId,
+            kind: 'model.request',
+            actor: 'system',
+            payload: modelRequestPayload({
+              system: currentSystem,
+              messages: current,
+              tools: specs.map(spec => spec.name),
+            }),
+          });
+        },
+        onModelResponse: ({ turn, text, toolCalls, usage, stopReason }) => {
+          events.tryAppend({
+            sessionId: runId,
+            turnId: `${runId}:t${turn}`,
+            runId,
+            kind: 'model.response',
+            actor: 'model',
+            payload: {
+              text,
+              toolCalls: toolCalls.map(call => ({ name: call.name, input: call.input })),
+              ...(usage ? { usage } : {}),
+              ...(stopReason ? { stopReason } : {}),
+            },
+          });
+        },
+        onEvent: event => {
+          if (event.type === 'tool-call') {
+            events.tryAppend({
+              sessionId: runId,
+              runId,
+              kind: 'tool.call',
+              actor: 'model',
+              payload: { name: event.name, input: event.input },
+            });
+          } else if (event.type === 'tool-result') {
+            events.tryAppend({
+              sessionId: runId,
+              runId,
+              kind: 'tool.result',
+              actor: 'tool',
+              payload: {
+                name: event.name,
+                content: event.content,
+                ...(event.uncertain ? { uncertain: event.uncertain } : {}),
+              },
+            });
+          }
+        },
         onToolExecuted: () => {
           this.toolExecuted = true;
         },
       });
       finished = loop.finished;
+      if (finished?.remember && finished.remember.length > 0) {
+        for (const item of finished.remember) {
+          try {
+            this.runtime.memory.write({
+              agentId: this.runtime.agentId,
+              key: item.key,
+              content: item.content,
+              ...(item.kind ? { kind: item.kind } : {}),
+              ...(item.tags ? { tags: item.tags } : {}),
+              sourceSessionId: runId,
+              sourceTurnId: runId,
+              sourceEventSeq: events.lastSeq(runId),
+              actor: 'agent',
+            });
+            events.tryAppend({
+              sessionId: runId,
+              turnId: runId,
+              runId,
+              kind: 'memory.written',
+              actor: 'agent',
+              payload: { key: item.key },
+            });
+          } catch (error) {
+            this.log('warn', `记忆 ${item.key} 写入失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
       result.turns = loop.turns;
       result.promptTokens = loop.promptTokens;
       result.completionTokens = loop.completionTokens;
@@ -235,6 +352,26 @@ export class AgentSession {
         result.status = loop.status;
         result.error = loop.error;
       }
+
+      events.tryAppend({
+        sessionId: runId,
+        turnId: runId,
+        runId,
+        kind: 'turn.end',
+        actor: 'system',
+        payload: {
+          status: result.status,
+          ...(result.error ? { error: result.error } : {}),
+          ...(finished ? { summary: finished.summary, outcome: finished.outcome } : {}),
+          turns: result.turns,
+        },
+      });
+      index.recordTurn({
+        sessionId: runId,
+        turnId: runId,
+        status: result.status,
+        summary: finished?.summary ?? result.error,
+      });
 
       if (finished) {
         result.summary = finished.summary;

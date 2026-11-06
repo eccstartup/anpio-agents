@@ -753,6 +753,10 @@ export class RouterRuntime {
             store: toolInput.store,
             mailbox: toolInput.mailbox,
             markReplied: toolInput.markReplied,
+            memory: toolInput.memory,
+            events: toolInput.events,
+            sessionIndex: toolInput.sessionIndex,
+            experience: toolInput.experience,
             ...(container ? { local: container, dispose: () => container.dispose() } : {}),
           },
           {

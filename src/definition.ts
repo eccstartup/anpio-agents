@@ -36,6 +36,15 @@ export const EMBEDDED_TOOLS = [
   'file_download',
   'file_upload',
   'knowledge_search',
+  'knowledge_get',
+  'knowledge_cite',
+  'knowledge_contribute',
+  'memory_search',
+  'memory_get',
+  'memory_set',
+  'memory_forget',
+  'session_search',
+  'session_peek',
   'shell',
   'read_file',
   'write_file',
@@ -52,8 +61,6 @@ export const EMBEDDED_TOOLS = [
   'schedule_cancel',
   'list_schedules',
   'http_fetch',
-  'memory_get',
-  'memory_set',
   'finish_turn',
 ] as const;
 
@@ -61,6 +68,23 @@ export type EmbeddedTool = (typeof EMBEDDED_TOOLS)[number];
 
 /** 执行引擎自己提供的工具，不依赖任何控制面。 */
 export const LOCAL_TOOLS = ['shell', 'read_file', 'write_file', 'list_files', 'finish'] as const;
+
+/**
+ * 引擎侧的记忆/会话/团队经验工具：不需要平台也应当可用（没有平台时
+ * knowledge_* 会明确说没有团队经验，而不是整个工具消失）。
+ */
+export const ENGINE_TOOLS = [
+  'memory_search',
+  'memory_get',
+  'memory_set',
+  'memory_forget',
+  'session_search',
+  'session_peek',
+  'knowledge_search',
+  'knowledge_get',
+  'knowledge_cite',
+  'knowledge_contribute',
+] as const;
 
 /** 常驻 router 才有的协作工具；进程内的 AgentHost 负责提供。 */
 export const ROUTER_TOOLS = [
@@ -75,13 +99,15 @@ export const ROUTER_TOOLS = [
   'schedule_cancel',
   'list_schedules',
   'http_fetch',
-  'memory_get',
-  'memory_set',
   'finish_turn',
 ] as const;
 
 export function isLocalTool(tool: EmbeddedTool): boolean {
   return (LOCAL_TOOLS as readonly string[]).includes(tool);
+}
+
+export function isEngineTool(tool: EmbeddedTool): boolean {
+  return (ENGINE_TOOLS as readonly string[]).includes(tool);
 }
 
 export function isRouterTool(tool: EmbeddedTool): boolean {

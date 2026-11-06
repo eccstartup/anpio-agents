@@ -146,6 +146,44 @@ export type KnowledgeSearch = {
   note: string;
 };
 
+export type KnowledgeEvidence = {
+  id?: string;
+  knowledgeId?: string;
+  version: number;
+  content: string;
+  conditions?: string;
+  reviewerId?: string | null;
+  expiresAt?: string | null;
+  sourceTaskId?: string | null;
+  reference?: string;
+  currentState?: string;
+  currentVersion?: number;
+  title?: string;
+  summary?: string;
+  kind?: string;
+  tags?: string[];
+  accessMode?: string;
+  evidenceLevel?: string;
+};
+
+export type KnowledgeCandidateInput = {
+  content: string;
+  kind?: string;
+  conditions?: string;
+  title?: string;
+  summary?: string;
+  tags?: string[];
+};
+
+export type KnowledgeCandidate = {
+  id: string;
+  version: number;
+  state?: string;
+  title?: string;
+  summary?: string;
+  [field: string]: unknown;
+};
+
 export type RequestOptions = {
   method?: 'GET' | 'POST';
   body?: unknown;
@@ -311,6 +349,28 @@ export class CollabClient {
   searchKnowledge(query: string, limit = 10, budget = 4000) {
     return this.request<KnowledgeSearch>(
       `knowledge/search?q=${encodeURIComponent(query)}&limit=${limit}&budget=${budget}`,
+    );
+  }
+
+  /** 平台没有 GET /knowledge/:id，只有 evidence（含当前状态与版本）。 */
+  knowledgeEvidence(knowledgeId: string) {
+    return this.request<KnowledgeEvidence>(
+      `knowledge/${encodeURIComponent(knowledgeId)}/evidence`,
+    );
+  }
+
+  referenceKnowledge(taskId: string, knowledgeId: string, operationId: string) {
+    return this.request<{ id: string; version: number }>(
+      `tasks/${encodeURIComponent(taskId)}/references`,
+      { body: { knowledgeId }, operationId },
+    );
+  }
+
+  /** 只能生成 candidate；发布/修订/撤销都留给人工。 */
+  createKnowledgeCandidate(taskId: string, input: KnowledgeCandidateInput, operationId: string) {
+    return this.request<KnowledgeCandidate>(
+      `tasks/${encodeURIComponent(taskId)}/knowledge`,
+      { body: input, operationId },
     );
   }
 

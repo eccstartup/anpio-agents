@@ -12,7 +12,11 @@ import { join } from 'node:path';
 import type { AnpSigningIdentity } from '@anpio-cli/core';
 import type { Brain } from '../brains/types.ts';
 import type { EmbeddedAgentDefinition } from '../definition.ts';
-import { isLocalTool, isRouterTool } from '../definition.ts';
+import { isEngineTool, isLocalTool, isRouterTool } from '../definition.ts';
+import type { ExperienceClient } from '../experience/client.ts';
+import type { MemoryStore } from '../memory/store.ts';
+import type { SessionEventLog } from '../session/events.ts';
+import type { SessionIndex } from '../session/index.ts';
 import { AnpClient, type AnpPayload } from '../anp/client.ts';
 import { loadOrCreateIdentity, writeAgentJson, type ServiceEndpoints } from '../anp/identity.ts';
 import { AgentRuntime } from '../runtime/agent.ts';
@@ -56,6 +60,10 @@ export type AgentHostOptions = {
     markReplied: () => void;
     agentId: string;
     entry: AgentEntry;
+    memory: MemoryStore;
+    events: SessionEventLog;
+    sessionIndex: SessionIndex;
+    experience: ExperienceClient;
   }) => BrainLoopTools;
 };
 
@@ -172,7 +180,9 @@ export class AgentHost {
 
   async start(): Promise<void> {
     const endpoints = this.options.endpoints;
-    const unsupported = this.entry.definition.tools.filter(tool => !isLocalTool(tool) && !isRouterTool(tool));
+    const unsupported = this.entry.definition.tools.filter(
+      tool => !isLocalTool(tool) && !isRouterTool(tool) && !isEngineTool(tool),
+    );
     if (unsupported.length > 0) {
       throw new Error(
         `agent ${this.agentId} 定义了 router 不提供的工具：${unsupported.join(', ')}`,
@@ -442,6 +452,10 @@ export class AgentHost {
               ...toolInput,
               agentId: this.agentId,
               entry: this.entry,
+              memory: runtime.memory,
+              events: runtime.sessionLog,
+              sessionIndex: runtime.sessionIndex,
+              experience: runtime.experience,
             }),
           }
         : {}),
