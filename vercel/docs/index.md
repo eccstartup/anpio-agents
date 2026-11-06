@@ -30,8 +30,8 @@ features:
     details: 本地原语、平台工具、ANP 协作工具按白名单取交集；能力缺失显式报错，不静默降级。
   - title: 隔离与限额
     details: 每轮独立 Session 目录，shell 超时杀整个进程组，输出按上限截断；可选进程隔离与容器模式。
-  - title: 插件化扩展（规划）
-    details: 用 MCP 接入流水线日志、监控与环节执行，权限、超时和审计仍由引擎统一管。
+  - title: 外部插件
+    details: 用 MCP server 接入流水线日志、监控与环节执行，3 个字段就接好；权限、超时和审计仍由引擎统一管。
 ---
 
 ## 这个引擎解决什么问题
@@ -62,7 +62,7 @@ Anpio Agents 把一次运行拆成三层：
 | 在本机对话、跑一次任务或提供 HTTP 服务 | [自运行](/guide/standalone) |
 | 接 supervisor、平台来源或 ANP router | [Collab 调用](/guide/collab) |
 | 定义文件有哪些字段、怎么校验 | [定义文件](/guide/definition) |
-| 把流水线日志、监控与环节执行接进来 | [外部插件（规划）](/guide/plugins) |
+| 把流水线日志、监控与环节执行接进来 | [外部插件](/guide/plugins) |
 
 ## 五分钟看到效果
 

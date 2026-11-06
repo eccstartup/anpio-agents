@@ -24,7 +24,12 @@ import {
   type ShellResult,
 } from './sandbox.ts';
 
-const MAX_RESULT_CHARS = 6_000;
+export const MAX_RESULT_CHARS = 6_000;
+
+/** 结果截断的唯一实现；插件结果也走这一层，保证模型看到的上限一致。 */
+export function truncateResult(text: string): string {
+  return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n…（已截断）` : text;
+}
 
 /**
  * 本地原语的实际执行位置。默认是进程内 sandbox；容器模式换成容器内的
@@ -238,7 +243,7 @@ function optionalVersion(input: Record<string, unknown>): number | undefined {
 
 function render(value: unknown): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
-  return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n…（已截断）` : text;
+  return truncateResult(text);
 }
 
 /** 下载文件名来自平台，落到本地前去掉路径分隔符、控制字符与前导点。 */

@@ -64,6 +64,14 @@ export type ThreadEvent =
   | ({ type: 'assistant-text'; text: string } & EventBase)
   | ({ type: 'tool-call'; name: string; input: unknown } & EventBase)
   | ({ type: 'tool-result'; name: string; content: string; uncertain?: string } & EventBase)
+  | ({
+      type: 'plugin-progress';
+      pluginId: string;
+      tool: string;
+      progress: number;
+      total?: number;
+      message?: string;
+    } & EventBase)
   | ({ type: 'log'; level: 'info' | 'warn'; text: string } & EventBase)
   | ({
       type: 'turn-end';

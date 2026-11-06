@@ -1,9 +1,23 @@
 # anpio-agents：外部插件能力（流水线接入）
 
-- 状态：提议，尚未实施
+- 状态：阶段 1/2 已实施（2026-11-06），阶段 3/4 未开始
+- 实现方式：协议层使用官方 `@modelcontextprotocol/sdk`，不自造 JSON-RPC
 - 日期：2026-11-06
 - 范围：定义扩展、工具装配、运行时事件、自运行与 Collab 两条路径
 - 非目标：插件市场、插件沙箱虚拟机、把插件当作消息来源、跨机器插件调度
+
+## 实施现状
+
+阶段 1/2 已落地，与本文的设计差异只有一处：MCP 协议不再手写，改用官方 SDK。
+
+- 模块：`src/plugins/{types,naming,config,mcp-client,registry,context,render,tools,check-cli}.ts`。
+- 装配：`src/threads/turn.ts`、`src/runtime/session.ts`、`src/runtime/anp/session.ts`；工具在 `AgentRuntime.preparePlugins()` 之后同步合并。
+- 生命周期：`AgentRuntime.close()` 已接到 router 热更新、worker 空闲/退出、聊天 CLI、一次性运行与 `--serve` 关闭。
+- 接入体验：`examples/plugins/ci-logs/server.ts` 模板、`examples/local-plugin.json`、`npm run plugin:check`、文档站“5 分钟接入”。
+- 临时接入：`--mcp "id=命令 参数"`（可重复，默认信任全部工具）、`--mcp-allow`、`--mcp-env`；REPL 里 `/mcp` / `/mcp add` / `/mcp remove`，运行时增删不影响其它插件。
+- 测试：`tests/fixtures/mcp-plugin.ts` + `tests/plugins.test.ts`（23 例），覆盖发现/白名单、翻页、启动失败、stdout 污染、超时、进程死亡、进度、空闲回收、并发、中止、审计、线程集成，以及命令行规格、通配符与运行时增删。
+
+阶段 3/4 仍未开始：平台定义 schema 与插件审批、HTTP 传输、真实 CI/监控适配器。
 
 ## 0. 背景
 
@@ -59,10 +73,9 @@
 | 字段 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `id` | 是 | — | `[a-z0-9-]{1,32}`，用于工具命名与审计 |
-| `transport` | 是 | `stdio` | `stdio` / `http` |
-| `command` | stdio 必填 | — | 可执行文件 |
+| `transport` | 否 | `stdio` | 目前只能是 stdio；`http` 在阶段 4 之前明确报错 |
+| `command` | 是 | — | 可执行文件 |
 | `args` | 否 | `[]` | 启动参数 |
-| `url` | http 必填 | — | MCP 服务地址 |
 | `env` | 否 | `[]` | 允许从运行进程继承的环境变量名，不接受明文值 |
 | `allow` | 是 | — | 允许模型调用的工具名；必须非空 |
 | `timeoutMs` | 否 | `30000` | 单次工具调用超时 |
@@ -116,10 +129,14 @@ export type PluginTool = {
 | 文件 | 职责 |
 | --- | --- |
 | `src/plugins/types.ts` | `PluginDefinition`、`PluginTool`、`PluginCallContext` |
-| `src/plugins/mcp-client.ts` | stdio / http JSON-RPC、握手、`tools/list`、`tools/call`、进度通知 |
-| `src/plugins/registry.ts` | 插件进程生命周期、健康检查、并发队列、空闲关闭 |
-| `src/plugins/tools.ts` | 校验配置、映射 `ToolSpec`、合并 `BrainLoopTools`、执行与审计 |
-| `src/plugins/context.ts` | 组装每次调用的 `_meta` 上下文 |
+| `src/plugins/naming.ts` | 唯一的工具命名规则，配置、注册表、AGENTS.md、script 校验共用 |
+| `src/plugins/config.ts` | `plugins` 校验与默认值、相对路径解析 |
+| `src/plugins/mcp-client.ts` | 官方 SDK 的 `Client` + `StdioClientTransport`；stderr 环、失败分类、退出收尾 |
+| `src/plugins/registry.ts` | 插件进程生命周期、白名单、并发闸门、空闲回收、审计 |
+| `src/plugins/context.ts` | 组装每次调用的 `_meta` 上下文与幂等键 |
+| `src/plugins/render.ts` | MCP `content` 转文本与两层截断 |
+| `src/plugins/tools.ts` | `withPlugins`：合并工具清单、路由插件调用、`endTurn` |
+| `src/plugins/check-cli.ts` | `plugin:check` 自检入口 |
 
 合并方式不侵入现有工具实现：
 
@@ -127,18 +144,27 @@ export type PluginTool = {
 // src/plugins/tools.ts
 export function withPlugins(
   base: BrainLoopTools,
-  registry: PluginRegistry,
+  registry: PluginRegistry | null,
   context: PluginCallContext,
 ): BrainLoopTools {
+  if (!registry) return base;
+  const specs = registry.specs();
+  if (specs.length === 0) return base;
+
   return {
-    specs: [...base.specs, ...registry.specs()],
+    specs: [...base.specs, ...specs],
     execute: async call => {
-      if (!call.name.startsWith('plugin__')) return base.execute(call);
-      return registry.call(call, context);
+      if (isPluginToolName(call.name) && registry.has(call.name)) {
+        return registry.call(call, context);
+      }
+      return base.execute(call);
     },
     dispose: async () => {
-      await base.dispose?.();
-      await registry.disposeTurn();
+      try {
+        await base.dispose?.();
+      } finally {
+        registry.endTurn();
+      }
     },
   };
 }
@@ -160,7 +186,8 @@ export function withPlugins(
 
 ### MCP 细节
 
-- `initialize` 超时用 `timeoutMs`；协议版本按客户端支持范围协商，服务端返回不兼容版本时启动失败。
+- 握手、版本协商、分帧、请求路由、取消与超时都由官方 SDK 负责；引擎只在握手前挂上自己的 `onerror` / `onclose` 钩子。
+- 协议版本按客户端支持范围协商，服务端返回不兼容版本时启动失败。
 - `stdio` 子进程只把 stdout 当 JSON-RPC 帧；插件的日志必须走 stderr。引擎保留最近 50 行 stderr 用于诊断，不发送给模型。
 - `tools/call` 返回的 `content` 转成文本；`isError: true` 以“工具失败”文本回到模型，不致命。
 - `notifications/progress` 转成 `plugin-progress` 事件（见第 5 节）。
@@ -252,7 +279,7 @@ anpio-agents --agent examples/local-pipeline.json
 
 ## 9. 实施阶段
 
-### 阶段 1：MCP stdio 与工具合并
+### 阶段 1：MCP stdio 与工具合并（已完成）
 
 - 定义 `plugins` 字段与校验（`src/definition.ts`、`src/standalone/config.ts`）。
 - `mcp-client.ts`：stdio 握手、`tools/list`、`tools/call`、超时、stderr 捕获。
@@ -261,7 +288,7 @@ anpio-agents --agent examples/local-pipeline.json
 - `script` 协议的 `parseScriptSteps` 允许插件工具名，便于无模型测试。
 - 测试：mock MCP server（`tests/fixtures/mcp-plugin.ts`）覆盖发现、调用、缺工具、启动失败、超时。
 
-### 阶段 2：上下文、幂等与进度
+### 阶段 2：上下文、幂等与进度（已完成）
 
 - `context.ts` 组装 `_meta`；`idempotencyKey` 与 `effects`。
 - `plugin-progress` 事件接入 `ThreadEvent` 与 REPL 渲染。
@@ -286,23 +313,34 @@ anpio-agents --agent examples/local-pipeline.json
 
 | 文件 | 改动 |
 | --- | --- |
-| `src/definition.ts` | `plugins` 字段、`PluginDefinition` 校验入口 |
-| `src/standalone/config.ts` | 解析与默认值、启动前校验 |
+| `package.json` | 依赖 `@modelcontextprotocol/sdk`、`zod`；脚本 `plugin:check` |
+| `src/definition.ts` | `plugins?: PluginDefinition[]` 字段 |
+| `src/standalone/config.ts` | 解析 `plugins`、脚本步骤放行插件工具、相对路径解析 |
+| `src/runtime/agent.ts` | `preparePlugins()`、`plugins`、`close()` |
 | `src/plugins/types.ts` | 新文件 |
-| `src/plugins/mcp-client.ts` | 新文件 |
+| `src/plugins/naming.ts` | 新文件 |
+| `src/plugins/config.ts` | 新文件 |
+| `src/plugins/mcp-client.ts` | 新文件，SDK 适配 |
 | `src/plugins/registry.ts` | 新文件 |
-| `src/plugins/tools.ts` | 新文件，`withPlugins` |
 | `src/plugins/context.ts` | 新文件 |
+| `src/plugins/render.ts` | 新文件 |
+| `src/plugins/tools.ts` | 新文件，`withPlugins` |
+| `src/plugins/check-cli.ts` | 新文件，`plugin:check` |
 | `src/threads/turn.ts` | 合并插件工具、转发进度事件 |
 | `src/runtime/session.ts` | 一次性运行装配与关闭 |
 | `src/runtime/anp/session.ts` | router 装配 |
-| `src/router/turn-tools.ts` | 与 router 工具合并 |
+| `src/router/agent-host.ts` | 停止与热更新时关闭旧 runtime |
 | `src/threads/types.ts` | `plugin-progress` 事件 |
-| `src/chat/repl.ts` | 进度渲染 |
+| `src/chat/repl.ts` | 进度渲染与节流 |
+| `src/chat/cli.ts`、`src/agent-worker.ts`、`src/session.ts`、`src/standalone.ts` | 退出收尾 |
+| `src/runtime/prompt.ts` | AGENTS.md 工具清单包含插件工具名 |
 | `tests/fixtures/mcp-plugin.ts` | 新文件，测试用 MCP 服务 |
-| `tests/plugins.test.ts` | 新文件 |
+| `tests/plugins.test.ts` | 新文件，19 例 |
+| `examples/plugins/ci-logs/server.ts` | 新文件，可复制的插件模板 |
+| `examples/local-plugin.json` | 新文件，script 协议示例 |
+| `vercel/docs/guide/plugins.md` | 新文档站页面（5 分钟接入） |
+| `vercel/docs/guide/definition.md` | `plugins` 字段 |
 | `docs/plugin-plan.md` | 本文件 |
-| `vercel/public/docs/plugins.md` | 文档站摘要 |
 
 ## 11. 验收
 
@@ -312,7 +350,11 @@ anpio-agents --agent examples/local-pipeline.json
 npm run check
 npm test
 
-# 定义里挂一个 mock 插件，script 协议直接调用
+# 自检：命令模式与定义文件模式
+npm run plugin:check -- --command "node examples/plugins/ci-logs/server.ts" --allow logs_tail,stage_status
+npm run plugin:check -- --definition examples/local-plugin.json --plugin ci --call logs_tail --input '{"limit":5}'
+
+# 定义里挂一个本地插件，script 协议直接调用
 npm run standalone -- --agent examples/local-plugin.json --message "查 build-123 日志"
 ```
 
@@ -324,6 +366,7 @@ npm run standalone -- --agent examples/local-plugin.json --message "查 build-12
 4. 插件缺失且 `optional: false` 时启动失败，错误信息包含插件 id 与原因。
 5. stderr 噪声不影响 JSON-RPC；stdout 非协议输出被检测并报错。
 6. 审计日志有插件、工具、耗时、状态，没有参数正文。
+7. 一次性运行结束后没有残留插件进程。
 
 阶段 3 额外验收：平台下发含 `plugins` 的定义，supervisor 启动 worker 后插件可用；未安装插件时运行记录可读；禁用插件后工具不再出现在工具清单里。
 

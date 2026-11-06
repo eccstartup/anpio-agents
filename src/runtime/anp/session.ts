@@ -10,6 +10,8 @@ import type { MailEnvelope } from '../../client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from '../../definition.ts';
 import { isLocalTool } from '../../definition.ts';
 import { createTools } from '../../tools.ts';
+import { declaredPluginTools } from '../../plugins/naming.ts';
+import { withPlugins } from '../../plugins/tools.ts';
 import type { AgentRuntime } from '../agent.ts';
 import { runBrainLoop, type BrainLoopTools } from '../brain-loop.ts';
 import { systemPromptFor, writeAgentsFile } from '../prompt.ts';
@@ -123,7 +125,12 @@ export class AnpTurnSession implements SessionTask {
     this.workdir = workdir;
     this.runtime.sessionBegin();
     const available = this.availableTools();
-    await writeAgentsFile(workdir, this.definition, available, ANP_ENVIRONMENT);
+    await writeAgentsFile(
+      workdir,
+      this.definition,
+      [...available, ...declaredPluginTools(this.definition.plugins).map((tool) => tool.exposedName)],
+      ANP_ENVIRONMENT,
+    );
 
     this.timer = setTimeout(() => {
       this.timedOut = true;
@@ -157,7 +164,26 @@ export class AnpTurnSession implements SessionTask {
 
       const context = buildThreadContext(this.store, this.threadId);
       const messages: ChatMessage[] = context.messages;
-      const tools = this.toolsFor(workdir);
+      const preparation = await this.runtime.preparePlugins(this.pluginLog());
+      for (const item of preparation.degraded) {
+        this.log('warn', `插件 ${item.id} 不可用，按 optional 降级：${item.reason}`);
+      }
+      const tools = withPlugins(this.toolsFor(workdir), this.runtime.plugins, {
+        runId: this.runId,
+        agentId: this.runtime.agentId,
+        threadId: this.threadId,
+        turnId: this.turnId,
+        signal: this.deadline.signal,
+        log: this.pluginLog(),
+        onProgress: (progress) => {
+          this.log(
+            'info',
+            `插件 ${progress.pluginId} ${progress.tool} 进度 ${progress.progress}${
+              progress.total === undefined ? '' : `/${progress.total}`
+            }${progress.message === undefined ? '' : `：${progress.message}`}`,
+          );
+        },
+      });
       turnTools = tools;
       const system = [
         systemPromptFor(this.definition, ANP_ENVIRONMENT),
@@ -278,6 +304,11 @@ export class AnpTurnSession implements SessionTask {
   private availableTools(): EmbeddedTool[] {
     if (this.toolFactory) return this.definition.tools;
     return this.definition.tools.filter(tool => isLocalTool(tool));
+  }
+
+  /** 工具层日志只有 info/warn 两档；插件层可能给 debug/error，这里折叠。 */
+  private pluginLog(): (level: 'debug' | 'info' | 'warn' | 'error', text: string) => void {
+    return (level, text) => this.log(level === 'warn' || level === 'error' ? 'warn' : 'info', text);
   }
 
   private toolsFor(runDir: string): BrainLoopTools {

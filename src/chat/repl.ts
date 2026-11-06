@@ -12,10 +12,25 @@ import type { StdinSource } from '../sources/stdin.ts';
 const HELP = `命令：
   /new       下一条消息开一个新的 thread
   /status    查看运行中的 thread 与来源
+  /mcp       查看已接入的 MCP 插件
+  /mcp add <id=命令 参数>   运行时接入一个 MCP server
+  /mcp remove <id>          断开并移除插件
   /exit      退出（Ctrl-D 也可以）
   /help      显示本帮助`;
 
-type TurnState = { printed: boolean; streamed: boolean; needsNewline: boolean };
+/** REPL 与插件层的接口；由入口负责把命令翻译成注册表操作。 */
+export type ReplPluginControl = {
+  list(): string;
+  add(spec: string): Promise<string>;
+  remove(id: string): Promise<string>;
+};
+
+type TurnState = {
+  printed: boolean;
+  streamed: boolean;
+  needsNewline: boolean;
+  progress: Map<string, number>;
+};
 
 export type ChatRendererOptions = {
   interactive: boolean;
@@ -28,6 +43,7 @@ export class ChatRenderer {
   private readonly out: NodeJS.WritableStream;
   private readonly err: NodeJS.WritableStream;
   private readonly turns = new Map<string, TurnState>();
+  private readonly backgroundProgress = new Map<string, number>();
 
   constructor(options: ChatRendererOptions) {
     this.interactive = options.interactive;
@@ -61,6 +77,12 @@ export class ChatRenderer {
         this.err.write(`← ${event.name}: ${truncate(first, 160)}${suffix}\n`);
         break;
       }
+      case 'plugin-progress':
+        if (reportProgress(state.progress, `${event.pluginId}\u0000${event.tool}`, event)) {
+          this.lineBreak(state);
+          this.err.write(`… ${progressText(event)}\n`);
+        }
+        break;
       case 'log':
         if (event.level === 'warn') this.err.write(`[${event.threadId}] ${event.text}\n`);
         break;
@@ -95,7 +117,19 @@ export class ChatRenderer {
       case 'tool-result':
         this.err.write(`${prefix} ← ${event.name}\n`);
         break;
+      case 'plugin-progress':
+        if (
+          reportProgress(
+            this.backgroundProgress,
+            `${event.threadId}\u0000${event.turnId}\u0000${event.pluginId}\u0000${event.tool}`,
+            event,
+          )
+        ) {
+          this.err.write(`${prefix} … ${progressText(event)}\n`);
+        }
+        break;
       case 'turn-end':
+        this.forgetProgress(event.threadId, event.turnId);
         this.err.write(
           `${prefix} 完成：${event.status}${event.summary ? ` ${truncate(event.summary, 200)}` : ''}`
           + `${event.error ? `（${event.error}）` : ''}\n`,
@@ -124,15 +158,28 @@ export class ChatRenderer {
   private stateOf(turnId: string): TurnState {
     const existing = this.turns.get(turnId);
     if (existing) return existing;
-    const created: TurnState = { printed: false, streamed: false, needsNewline: false };
+    const created: TurnState = {
+      printed: false,
+      streamed: false,
+      needsNewline: false,
+      progress: new Map(),
+    };
     this.turns.set(turnId, created);
     return created;
+  }
+
+  private forgetProgress(threadId: string, turnId: string): void {
+    const prefix = `${threadId}\u0000${turnId}\u0000`;
+    for (const key of this.backgroundProgress.keys()) {
+      if (key.startsWith(prefix)) this.backgroundProgress.delete(key);
+    }
   }
 }
 
 export type ReplOptions = {
   host: ThreadHost;
   stdin: StdinSource;
+  plugins?: ReplPluginControl;
   output?: NodeJS.WritableStream;
   error?: NodeJS.WritableStream;
 };
@@ -140,6 +187,7 @@ export type ReplOptions = {
 export class Repl {
   private readonly host: ThreadHost;
   private readonly stdin: StdinSource;
+  private readonly pluginControl: ReplPluginControl | undefined;
   private readonly out: NodeJS.WritableStream;
   private readonly err: NodeJS.WritableStream;
   private currentThreadId = 'local:main';
@@ -151,6 +199,7 @@ export class Repl {
   constructor(options: ReplOptions) {
     this.host = options.host;
     this.stdin = options.stdin;
+    this.pluginControl = options.plugins;
     this.out = options.output ?? process.stdout;
     this.err = options.error ?? process.stderr;
     this.stdin.onCommand = command => this.command(command);
@@ -203,6 +252,12 @@ export class Repl {
         this.stdin.prompt();
         return true;
       }
+      case '/mcp':
+      case '/plugin': {
+        const rest = raw.trim().slice(name.length).trim();
+        void this.pluginCommand(rest);
+        return true;
+      }
       case '/help':
         this.out.write(`${HELP}\n`);
         this.stdin.prompt();
@@ -210,6 +265,58 @@ export class Repl {
       default:
         return false;
     }
+  }
+
+  /** `/mcp` 查看，`/mcp add <spec>` 接入，`/mcp remove <id>` 移除。 */
+  private async pluginCommand(rest: string): Promise<void> {
+    const control = this.pluginControl;
+    if (!control) {
+      this.err.write('这个入口没有启用插件管理。\n');
+      this.stdin.prompt();
+      return;
+    }
+
+    try {
+      const match = /^(add|connect|remove|rm|list)?\s*([\s\S]*)$/.exec(rest);
+      const verb = match?.[1] ?? '';
+      const argument = (match?.[2] ?? '').trim();
+
+      if (verb === '' || verb === 'list') {
+        if (argument !== '') {
+          await this.pluginAdd(control, argument);
+        } else {
+          this.out.write(`${control.list()}\n`);
+        }
+      } else if (verb === 'add' || verb === 'connect') {
+        if (argument === '') {
+          this.err.write('用法：/mcp add <id=命令 参数>，例如 /mcp add ci=node ./ci-mcp.ts\n');
+        } else {
+          await this.pluginAdd(control, argument);
+        }
+      } else if (verb === 'remove' || verb === 'rm') {
+        if (argument === '') {
+          this.err.write('用法：/mcp remove <id>\n');
+        } else if (!this.busy()) {
+          this.out.write(`${await control.remove(argument)}\n`);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.err.write(`插件操作失败：${message}\n`);
+    }
+
+    this.stdin.prompt();
+  }
+
+  private async pluginAdd(control: ReplPluginControl, spec: string): Promise<void> {
+    if (this.busy()) return;
+    this.out.write(`${await control.add(spec)}\n`);
+  }
+
+  private busy(): boolean {
+    if (this.host.snapshot().threads === 0) return false;
+    this.err.write('有 thread 正在运行，等本轮结束再改插件。\n');
+    return true;
   }
 
   private signal(): void {
@@ -235,4 +342,21 @@ export class Repl {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+/** 进度每 10 条报一次；到终值那一条一定报，避免话痨插件刷屏。 */
+function reportProgress(
+  counts: Map<string, number>,
+  key: string,
+  event: Extract<ThreadEvent, { type: 'plugin-progress' }>,
+): boolean {
+  const count = (counts.get(key) ?? 0) + 1;
+  counts.set(key, count);
+  return (event.total !== undefined && event.progress >= event.total) || count % 10 === 0;
+}
+
+function progressText(event: Extract<ThreadEvent, { type: 'plugin-progress' }>): string {
+  const total = event.total === undefined ? '' : `/${event.total}`;
+  const message = event.message === undefined ? '' : ` ${truncate(event.message, 120)}`;
+  return `插件 ${event.pluginId} ${event.tool} ${event.progress}${total}${message}`;
 }

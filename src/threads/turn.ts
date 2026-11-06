@@ -15,6 +15,7 @@ import type { ToolBackend } from '../runtime/transport.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool } from '../definition.ts';
 import { isLocalTool } from '../definition.ts';
 import { createTools } from '../tools.ts';
+import { withPlugins } from '../plugins/tools.ts';
 import type { AgentStore, InboxRow } from '../store/agent-store.ts';
 import { buildThreadContext, ensureThreadWorkspace, THREAD_ENVIRONMENT } from './context.ts';
 import type { InboundMessage, MessageSource, ThreadEvent, TurnHandle } from './types.ts';
@@ -126,7 +127,16 @@ export class ThreadTurn {
       const backend = this.backendFor(rows);
       const available = this.availableTools(backend);
       const environment = this.environmentFor(rows);
-      await writeAgentsFile(this.workdir, this.definition, available, environment);
+
+      const toolLog = (level: 'debug' | 'info' | 'warn' | 'error', text: string): void => {
+        this.log(level === 'error' || level === 'warn' ? 'warn' : 'info', text);
+      };
+      const preparation = await this.runtime.preparePlugins(toolLog);
+      for (const item of preparation.degraded) {
+        this.log('warn', `插件 ${item.id} 不可用，按 optional 降级：${item.reason}`);
+      }
+      const authored = [...available, ...preparation.tools.map((tool) => tool.exposedName)];
+      await writeAgentsFile(this.workdir, this.definition, authored, environment);
 
       const context = buildThreadContext(this.store, this.threadId);
       const system = [
@@ -143,14 +153,34 @@ export class ThreadTurn {
         ].filter(Boolean).join('\n'),
       ].join('\n\n');
 
-      tools = createTools({
-        ...(backend ? { backend } : {}),
-        runDir: this.workdir,
-        runId: this.turnId,
-        definition: this.definition,
-        tools: available,
-        log: (level, text) => this.log(level === 'error' ? 'warn' : level === 'debug' ? 'info' : level, text),
-      });
+      tools = withPlugins(
+        createTools({
+          ...(backend ? { backend } : {}),
+          runDir: this.workdir,
+          runId: this.turnId,
+          definition: this.definition,
+          tools: available,
+          log: toolLog,
+        }),
+        this.runtime.plugins,
+        {
+          runId: this.runId,
+          agentId: this.runtime.agentId,
+          threadId: this.threadId,
+          turnId: this.turnId,
+          signal: this.controller.signal,
+          log: toolLog,
+          onProgress: (progress) => {
+            this.emit({
+              type: 'plugin-progress',
+              threadId: this.threadId,
+              turnId: this.turnId,
+              sourceId: this.sourceId,
+              ...progress,
+            });
+          },
+        },
+      );
 
       this.timer = setTimeout(() => {
         this.timedOut = true;

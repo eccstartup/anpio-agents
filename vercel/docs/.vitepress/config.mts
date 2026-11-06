@@ -23,7 +23,7 @@ export default defineConfig({
       { text: '自运行', link: '/guide/standalone' },
       { text: 'Collab 调用', link: '/guide/collab' },
       { text: '参考', link: '/guide/definition' },
-      { text: '插件规划', link: '/guide/plugins' }
+      { text: '插件', link: '/guide/plugins' }
     ],
     sidebar: {
       '/guide/': [
@@ -39,10 +39,10 @@ export default defineConfig({
           ]
         },
         {
-          text: '参考与规划',
+          text: '参考',
           items: [
             { text: '定义文件', link: '/guide/definition' },
-            { text: '外部插件（规划）', link: '/guide/plugins' }
+            { text: '外部插件', link: '/guide/plugins' }
           ]
         }
       ]

@@ -1,0 +1,29 @@
+{
+  "id": "local-plugin-demo",
+  "name": "插件演示",
+  "description": "启动 examples/plugins/ci-logs 这个 MCP 插件，调用它查日志与阶段状态，再收尾。不需要模型密钥。",
+  "provider": {
+    "id": "script",
+    "protocol": "script",
+    "model": "script",
+    "script": [
+      { "tool": "plugin__ci__stage_status", "input": { "buildId": "build-123" } },
+      { "tool": "plugin__ci__logs_tail", "input": { "limit": 5 } },
+      {
+        "tool": "finish",
+        "input": { "summary": "已通过 ci 插件读取 build-123 的阶段状态与最新日志", "outcome": "done" }
+      }
+    ]
+  },
+  "plugins": [
+    {
+      "id": "ci",
+      "command": "node",
+      "args": ["./plugins/ci-logs/server.ts"],
+      "allow": ["logs_tail", "stage_status"]
+    }
+  ],
+  "tools": ["finish"],
+  "limits": { "maxTurns": 8, "timeoutMs": 60000, "maxTokens": 1024 },
+  "concurrency": 1
+}

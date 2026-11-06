@@ -114,6 +114,7 @@ async function main(): Promise<number> {
 
   const result = await session.run();
   if (config.reportResult) await writeLine({ type: 'session-result', ...result });
+  await runtime.close().catch(() => undefined);
   return exitCode(result.status);
 }
 

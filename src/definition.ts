@@ -5,6 +5,8 @@
  * 已经规范化的结构，离线时也可以用 examples/agents.json 里的定义自测。
  */
 
+import type { PluginDefinition } from './plugins/types.ts';
+
 export const PROTOCOLS = [
   'openai-chat',
   'openai-responses',
@@ -145,6 +147,8 @@ export type EmbeddedAgentDefinition = {
   provider: EmbeddedProviderConfig;
   systemPrompt: string;
   tools: EmbeddedTool[];
+  /** 外部 MCP 插件；工具名形如 plugin__<id>__<tool>，不进 EmbeddedTool。 */
+  plugins?: PluginDefinition[];
   scopes: AgentScope[];
   limits: EmbeddedLimits;
   sandbox: EmbeddedSandbox;

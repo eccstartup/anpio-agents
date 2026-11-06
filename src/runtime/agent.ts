@@ -10,8 +10,11 @@ import { brainFor } from '../brains/index.ts';
 import type { Brain, ToolSpec } from '../brains/types.ts';
 import { CollabClient } from '../client.ts';
 import type { EmbeddedAgentDefinition, EmbeddedTool, SessionIsolation } from '../definition.ts';
+import { parsePlugins } from '../plugins/config.ts';
+import { PluginRegistry } from '../plugins/registry.ts';
+import type { PluginDefinition, PluginPreparation } from '../plugins/types.ts';
 import { ensureAgentRoot } from '../sandbox.ts';
-import { createTools } from '../tools.ts';
+import { createTools, type ToolLog } from '../tools.ts';
 import { ProcessSession } from './process-session.ts';
 import { AgentSession } from './session.ts';
 import { collabTransport, type AgentTransport } from './transport.ts';
@@ -53,6 +56,8 @@ export class AgentRuntime {
   private brainInstance: Brain | null;
   private readonly taskFactory: SessionTaskFactory | undefined;
   private specsCache: ToolSpec[] | null = null;
+  private pluginRegistry: PluginRegistry | null = null;
+  private pluginPreparation: Promise<PluginPreparation> | null = null;
   private running = 0;
   private presence = 0;
   private readonly waiters: Array<() => void> = [];
@@ -122,6 +127,106 @@ export class AgentRuntime {
   get concurrency(): number {
     const value = Math.trunc(this.definition.concurrency);
     return Number.isInteger(value) && value > 0 ? value : 1;
+  }
+
+  /** 已准备好的插件注册表；没有插件或还没 prepare 时是 null。 */
+  get plugins(): PluginRegistry | null {
+    return this.pluginRegistry;
+  }
+
+  /** 当前声明的插件：定义文件里的 + 运行时通过命令行 / REPL 加进来的。 */
+  get pluginDefinitions(): PluginDefinition[] {
+    return this.definition.plugins ?? [];
+  }
+
+  /**
+   * 运行时接入插件（命令行的 --mcp、REPL 的 /mcp add）。
+   * 返回重新计算后的工具清单；已在运行的插件不受影响。
+   */
+  async addPlugins(additions: PluginDefinition[], log?: ToolLog): Promise<PluginPreparation> {
+    if (additions.length === 0) return await this.preparePlugins(log);
+
+    const ids = new Set(this.pluginDefinitions.map((plugin) => plugin.id));
+    for (const plugin of additions) {
+      if (ids.has(plugin.id)) throw new Error(`插件 id 重复：${plugin.id}`);
+    }
+    this.definition.plugins = [...this.pluginDefinitions, ...additions];
+
+    if (!this.pluginRegistry) {
+      this.pluginPreparation = null;
+      return await this.preparePlugins(log);
+    }
+
+    this.pluginRegistry.add(additions);
+    const promise = this.pluginRegistry.prepare().catch((error: unknown) => {
+      this.pluginPreparation = null;
+      throw error;
+    });
+    this.pluginPreparation = promise;
+    return promise;
+  }
+
+  /** 运行时移除插件：关掉对应进程，其余插件的连接保留。 */
+  async removePlugins(ids: readonly string[]): Promise<PluginPreparation> {
+    const removed = new Set(ids);
+    this.definition.plugins = this.pluginDefinitions.filter((plugin) => !removed.has(plugin.id));
+
+    if (this.pluginDefinitions.length === 0) {
+      await this.close();
+      return { tools: [], degraded: [] };
+    }
+
+    const registry = this.pluginRegistry;
+    if (!registry) {
+      this.pluginPreparation = null;
+      return await this.preparePlugins();
+    }
+
+    await registry.remove(removed);
+    const promise = registry.prepare().catch((error: unknown) => {
+      this.pluginPreparation = null;
+      throw error;
+    });
+    this.pluginPreparation = promise;
+    return promise;
+  }
+
+  /**
+   * 启动并发现插件工具。记忆化：同一 agent 的多个 Session 共用一份进程。
+   * 失败后清缓存重抛，下一轮会重新尝试；required 插件失败即本轮失败。
+   *
+   * 平台路径的定义没有经过本地校验，这里再解析一次，不能假设上游规范化过。
+   */
+  async preparePlugins(log?: ToolLog): Promise<PluginPreparation> {
+    if (this.pluginPreparation) return this.pluginPreparation;
+
+    const plugins = parsePlugins(this.definition.plugins);
+    if (!plugins || plugins.length === 0) return { tools: [], degraded: [] };
+
+    const registry = new PluginRegistry({
+      agentId: this.agentId,
+      agentRoot: this.root,
+      plugins,
+      ...(log === undefined ? {} : { log }),
+    });
+    this.pluginRegistry = registry;
+
+    const promise = registry.prepare().catch(async (error: unknown) => {
+      this.pluginPreparation = null;
+      this.pluginRegistry = null;
+      await registry.closeAll().catch(() => {});
+      throw error;
+    });
+    this.pluginPreparation = promise;
+    return promise;
+  }
+
+  /** 统一收尾：关闭插件进程。幂等，可以重复调用。 */
+  async close(): Promise<void> {
+    const registry = this.pluginRegistry;
+    this.pluginRegistry = null;
+    this.pluginPreparation = null;
+    await registry?.closeAll();
   }
 
   get activeSessions(): number {

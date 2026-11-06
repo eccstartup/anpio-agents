@@ -108,6 +108,11 @@ class AgentWorker {
     }
   }
 
+  /** 退出前统一收尾：插件进程必须随 worker 结束。 */
+  async close(): Promise<void> {
+    await this.runtime.close();
+  }
+
   private pump(): void {
     while (this.active < this.runtime.concurrency && this.queue.length > 0) {
       const runId = this.queue.shift()!;
@@ -139,8 +144,10 @@ class AgentWorker {
     if (!this.accepting || this.idleMs <= 0) return;
     this.clearIdle();
     this.idleTimer = setTimeout(() => {
-      emit({ type: 'idle-exit' });
-      process.exit(0);
+      void this.close().finally(() => {
+        emit({ type: 'idle-exit' });
+        process.exit(0);
+      });
     }, this.idleMs);
     this.idleTimer.unref?.();
   }
@@ -191,7 +198,11 @@ async function main(): Promise<void> {
 
   const stop = (graceMs: number) => {
     if (!worker) process.exit(0);
-    void worker.shutdown(graceMs).finally(() => process.exit(0));
+    const current = worker;
+    void current
+      .shutdown(graceMs)
+      .then(() => current.close())
+      .finally(() => process.exit(0));
   };
   process.on('SIGTERM', () => stop(SHUTDOWN_GRACE_MS));
   process.on('SIGINT', () => stop(SHUTDOWN_GRACE_MS));
@@ -219,14 +230,18 @@ function handleCommand(worker: AgentWorker, line: string): void {
       worker.enqueue(command.runId);
       return;
     case 'drain':
-      void worker.drain().then(() => {
-        emit({ type: 'drained' });
-        process.exit(0);
-      });
+      void worker
+        .drain()
+        .then(() => worker.close())
+        .then(() => {
+          emit({ type: 'drained' });
+          process.exit(0);
+        });
       return;
     case 'shutdown':
       void worker
         .shutdown(Number.isFinite(command.graceMs) ? Number(command.graceMs) : SHUTDOWN_GRACE_MS)
+        .then(() => worker.close())
         .finally(() => process.exit(0));
       return;
     default:

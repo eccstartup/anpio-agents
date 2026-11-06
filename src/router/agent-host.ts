@@ -298,6 +298,8 @@ export class AgentHost {
     this.timer = null;
     for (const task of this.tasks.values()) task.abort('router 正在关闭');
     await this.idle();
+    await this.runtime?.close();
+    this.runtime = null;
     this.store?.close();
     this.store = null;
     this.log(`[${this.agentId}] 已停止`);
@@ -320,7 +322,9 @@ export class AgentHost {
     this.pendingEntry = null;
     const previous = this.entry;
     this.entry = entry;
+    const previousRuntime = this.runtime;
     this.runtime = await this.buildRuntime(entry.definition);
+    await previousRuntime?.close().catch(() => undefined);
     this.options.router.upsertAgent({
       agentId: this.agentId,
       name: entry.definition.name,

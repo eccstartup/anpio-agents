@@ -5,7 +5,7 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { MailEnvelope } from '../client.ts';
-import type { EmbeddedAgentDefinition, EmbeddedTool } from '../definition.ts';
+import type { EmbeddedAgentDefinition } from '../definition.ts';
 
 const MAX_CONTENT_CHARS = 8_000;
 
@@ -82,7 +82,7 @@ export function substitute(value: unknown, vars: Record<string, string>): Record
 export async function writeAgentsFile(
   dir: string,
   definition: EmbeddedAgentDefinition,
-  tools: readonly EmbeddedTool[] = definition.tools,
+  tools: readonly string[] = definition.tools,
   environment: EnvironmentDescription = COLLAB_ENVIRONMENT,
 ): Promise<void> {
   const content = [
@@ -100,6 +100,7 @@ export async function writeAgentsFile(
     tools.map(tool => `- ${tool}`).join('\n'),
     '',
     '环境变量只有 PATH/HOME/TMPDIR/LANG；平台令牌与模型密钥不在子进程环境里。',
+    '插件进程只继承定义 `plugins[].env` 里列出的变量。',
   ].join('\n');
   await writeFile(join(dir, 'AGENTS.md'), content, { mode: 0o600 });
 }

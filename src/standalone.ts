@@ -14,6 +14,7 @@ import {
 } from './standalone/conversation.ts';
 import { createStandaloneRuntime, StandaloneAgent } from './standalone/runner.ts';
 import { startStandaloneServer } from './standalone/server.ts';
+import { mergePlugins, pluginDefinitionsFromCli } from './plugins/cli-spec.ts';
 import type { CompletionPolicy } from './definition.ts';
 import { COMPLETION_POLICIES } from './definition.ts';
 import type { SessionOutcome } from './runtime/types.ts';
@@ -30,6 +31,9 @@ type CliOptions = {
   serve: boolean;
   host?: string;
   port?: number;
+  mcp: string[];
+  mcpAllow: string[];
+  mcpEnv: string[];
   help: boolean;
 };
 
@@ -42,6 +46,9 @@ const HELP = `用法：npm run standalone -- --agent <定义文件> [选项]
   --completion <策略>     finish（默认）或 text：纯文本回答是否算完成
   --max-messages <n>      一轮最多处理几条消息（默认 5）
   --allow-missing-tools   定义里的平台工具缺失时降级继续，而不是启动报错
+  --mcp "<id=命令 参数>"  临时接入一个 MCP server，可重复
+  --mcp-allow <id=a,b>    收窄对应插件暴露的工具（默认全部）
+  --mcp-env <id=VAR,..>   允许插件继承的环境变量名
   --keep-run              保留本次 Session 目录，便于排查
   --serve                 启动本地 HTTP 服务，而不是跑一次就退出
   --host <地址>           服务监听地址（默认 127.0.0.1；非回环地址必须设令牌）
@@ -84,6 +91,9 @@ function parseArgs(argv: string[]): CliOptions {
     allowMissingTools: false,
     keepRun: false,
     serve: false,
+    mcp: [],
+    mcpAllow: [],
+    mcpEnv: [],
     help: false,
   };
 
@@ -139,6 +149,15 @@ function parseArgs(argv: string[]): CliOptions {
       }
       case '--allow-missing-tools':
         options.allowMissingTools = takeFlag();
+        break;
+      case '--mcp':
+        options.mcp.push(takeValue());
+        break;
+      case '--mcp-allow':
+        options.mcpAllow.push(takeValue());
+        break;
+      case '--mcp-env':
+        options.mcpEnv.push(takeValue());
         break;
       case '--keep-run':
         options.keepRun = takeFlag();
@@ -214,9 +233,20 @@ async function main(): Promise<number> {
 
   if (options.keepRun) process.env.AGENT_KEEP_RUN = '1';
 
+  const cliPlugins = pluginDefinitionsFromCli({
+    mcp: options.mcp,
+    allow: options.mcpAllow,
+    env: options.mcpEnv,
+  });
+
   const definition = await loadDefinition(options.agent, {
     ...(options.completion ? { completion: options.completion } : {}),
+    ...(cliPlugins.length > 0 ? { extraPlugins: cliPlugins } : {}),
   });
+
+  if (cliPlugins.length > 0) {
+    definition.plugins = mergePlugins(definition.plugins, cliPlugins);
+  }
 
   const { runtime, transport } = await createStandaloneRuntime(definition, {
     ...(options.root ? { root: options.root } : {}),
@@ -255,6 +285,7 @@ async function main(): Promise<number> {
     process.once('SIGTERM', stop);
     process.once('SIGINT', stop);
     await server.done;
+    await runtime.close();
     process.stderr.write('standalone 服务已退出\n');
     return 0;
   }
@@ -263,12 +294,16 @@ async function main(): Promise<number> {
   const input = parseInput(raw);
   const threadId = options.thread ?? input.threadId;
 
-  const { runId, result } = await agent.run({
-    text: input.text,
-    ...(threadId ? { threadId } : {}),
-  });
-  process.stdout.write(`${JSON.stringify({ runId, ...result })}\n`);
-  return exitCode(result.status);
+  try {
+    const { runId, result } = await agent.run({
+      text: input.text,
+      ...(threadId ? { threadId } : {}),
+    });
+    process.stdout.write(`${JSON.stringify({ runId, ...result })}\n`);
+    return exitCode(result.status);
+  } finally {
+    await runtime.close();
+  }
 }
 
 process.stdout.on('error', () => process.exit(0));

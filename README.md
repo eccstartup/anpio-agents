@@ -39,6 +39,7 @@ anpio-collab（控制面）                 anpio-agents（执行引擎）
 - Node.js ≥ 22.18（直接运行 TypeScript，无需构建）
 - 能访问平台的 HTTP 接口
 - 平台侧设置了 `COLLAB_EMBEDDED_SECRET`，且与本仓库运行环境一致
+- 插件层随 `npm install` 安装官方 `@modelcontextprotocol/sdk`；插件本身可以是任何语言的 MCP server（Node ≥18）
 
 ## 安装
 
@@ -400,6 +401,8 @@ container/build.sh
 
 工具白名单来自定义里的 `tools`；不含 `finish` 时平台会自动补上。启用工具所需的范围由平台自动补齐（如 `offer_claim` → `offers:claim`、`file_upload` → `tasks:submit`）。工具失败以文本回到模型，只有“写请求结果未知”会中止本轮并以 `outcome_unknown` 收尾。
 
+外部能力用[插件](vercel/docs/guide/plugins.md)接入：定义里声明一个 MCP server，模型拿到的工具名是 `plugin__<id>__<tool>`，只暴露 `allow` 里的工具。插件协议层使用官方 `@modelcontextprotocol/sdk`（核心引擎仍不新增依赖；插件层是明确例外）。临时接入不用改定义：`npm run agents -- --agent examples/local-chat.json --mcp "ci=node ./examples/plugins/ci-logs/server.ts"`；交互中也可以 `/mcp add` / `/mcp remove`。自检见 `npm run plugin:check -- --help`。
+
 ## 模型协议
 
 | 协议 | 用途 |
@@ -445,6 +448,7 @@ npm run check
 - `tests/store.test.ts`：迁移幂等、WAL 并发、`BEGIN IMMEDIATE` 争用、lease 过期与 outbox 去重；
 - `tests/anp-identity.test.ts` / `tests/anp-service.test.ts` / `tests/anp-mailbox.test.ts`：DID 文档自验、ADP 与发现索引、签名投递与 nonce 重放、游标与租约；
 - `tests/thread-session.test.ts` / `tests/router.test.ts` / `tests/router-tools.test.ts`：同 thread 多轮与恢复、两个 agent 互发、按 DID/能力路由、子 agent 收缩、写工具幂等；
+- `tests/plugins.test.ts`：插件命名与配置、`_meta` 与幂等键、结果渲染、白名单与翻页、启动失败、stdout 污染、超时与进程死亡的读写语义、进度、空闲回收、并发、中止、审计与线程集成；
 - `tests/cross-domain.test.ts`：跨域配置与域名匹配、本机优先的 relay 包装、两个服务双向投递与幂等重放、外部入站映射、一次性 thread 归档与复活、`aged_out` 汇总；
 - `tests/scheduler.test.ts`：at / interval / cron、catch-up、重复 tick 与重启不重复、取消；
 - `tests/container.test.ts`：容器内执行器的 token 校验、路径与符号链接逃逸、docker 缺失时的跳过/回退；`ANP_TEST_CONTAINER=1` 时额外验收无密钥环境变量、workspace 可写与默认无网络；
@@ -470,6 +474,7 @@ npm run check
 - [ANP 常驻运行时方案](docs/anp-runtime-plan.md)：多 agent router、身份与 DID、长期 session、调度、子 agent 与容器隔离
 - [独立运行方案](docs/standalone-plan.md)：把控制面抽成端口，让同一个执行引擎可以脱离 anpio-collab 单独运行，并为任意触发/工具接口预留扩展点
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
-- [外部插件方案](docs/plugin-plan.md)：把流水线日志、监控与环节执行作为插件接入（提议）
+- [外部插件方案](docs/plugin-plan.md)：把流水线日志、监控与环节执行作为 MCP 插件接入（阶段 1/2 已实施）
+- [智能体记忆方案](docs/memory-plan.md)：长期记忆的条目化存储、轮末写入、提示词注入与整理任务（设计）
 - [文档站](vercel/README.md)：基于 VitePress 的自运行 / Collab 使用文档，可部署到 Vercel
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议

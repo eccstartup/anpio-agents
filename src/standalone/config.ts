@@ -7,7 +7,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, dirname } from 'node:path';
 import {
   COMPLETION_POLICIES,
   EMBEDDED_TOOLS,
@@ -22,6 +22,9 @@ import {
   type ScriptStep,
   type SessionIsolation,
 } from '../definition.ts';
+import { parsePlugins, PluginConfigError, resolvePluginPaths } from '../plugins/config.ts';
+import { declaredPluginTools } from '../plugins/naming.ts';
+import type { PluginDefinition } from '../plugins/types.ts';
 
 type Raw = Record<string, unknown>;
 
@@ -32,6 +35,8 @@ export class StandaloneConfigError extends Error {
 export type LoadDefinitionOptions = {
   /** 命令行覆盖定义里的完成策略。 */
   completion?: CompletionPolicy;
+  /** 命令行接入、还没写进定义文件的插件；脚本步骤可以引用它们的工具。 */
+  extraPlugins?: PluginDefinition[];
   now?: Date;
 };
 
@@ -128,16 +133,20 @@ function requireString(value: unknown, path: string): string {
   return value.trim();
 }
 
-function parseScriptSteps(value: unknown): ScriptStep[] {
+function parseScriptSteps(value: unknown, pluginTools: readonly string[]): ScriptStep[] {
   if (!Array.isArray(value)) fail('provider.script', '必须是数组');
+  const known = new Set<string>([...EMBEDDED_TOOLS, ...pluginTools]);
   return value.map((item, index) => {
     const path = `provider.script[${index}]`;
     const step = record(item, path);
     const text = optionalString(step.text, `${path}.text`);
     const tool = optionalString(step.tool, `${path}.tool`);
     if (text === undefined && tool === undefined) fail(path, '需要 text 或 tool 至少一项');
-    if (tool !== undefined && !(EMBEDDED_TOOLS as readonly string[]).includes(tool)) {
-      fail(`${path}.tool`, `不是已知工具：${tool}`);
+    if (tool !== undefined && !known.has(tool)) {
+      fail(
+        `${path}.tool`,
+        `不是已知工具：${tool}（插件工具要写 plugin__<id>__<tool>，并出现在 plugins[].allow 里）`,
+      );
     }
     if (step.input !== undefined && !isRecord(step.input)) fail(`${path}.input`, '必须是对象');
     return {
@@ -164,7 +173,11 @@ function parseTools(value: unknown): EmbeddedTool[] {
   return tools;
 }
 
-function parseProvider(raw: unknown, providerIdFallback: string): EmbeddedProviderConfig {
+function parseProvider(
+  raw: unknown,
+  providerIdFallback: string,
+  pluginTools: readonly string[],
+): EmbeddedProviderConfig {
   const provider = record(raw, 'provider');
   const protocol = requireString(provider.protocol, 'provider.protocol') as Protocol;
   if (!(PROTOCOLS as readonly string[]).includes(protocol)) {
@@ -203,10 +216,10 @@ function parseProvider(raw: unknown, providerIdFallback: string): EmbeddedProvid
 
   const script =
     protocol === 'script'
-      ? parseScriptSteps(provider.script)
+      ? parseScriptSteps(provider.script, pluginTools)
       : provider.script === undefined
         ? undefined
-        : parseScriptSteps(provider.script);
+        : parseScriptSteps(provider.script, pluginTools);
 
   return {
     id: optionalString(provider.id, 'provider.id') ?? providerIdFallback,
@@ -251,7 +264,19 @@ export function normalizeDefinition(
     fail('id', '只能包含字母、数字、. _ : -，长度 1–128');
   }
 
-  const provider = parseProvider(root.provider, `standalone-${id}`);
+  let plugins: PluginDefinition[] | undefined;
+  try {
+    plugins = parsePlugins(root.plugins);
+  } catch (error) {
+    if (error instanceof PluginConfigError) throw new StandaloneConfigError(error.message);
+    throw error;
+  }
+  const pluginToolNames = declaredPluginTools([
+    ...(plugins ?? []),
+    ...(options.extraPlugins ?? []),
+  ]).map((entry) => entry.exposedName);
+
+  const provider = parseProvider(root.provider, `standalone-${id}`, pluginToolNames);
   const tools = parseTools(root.tools);
 
   const limitsRaw = root.limits === undefined ? {} : record(root.limits, 'limits');
@@ -292,6 +317,7 @@ export function normalizeDefinition(
     provider,
     systemPrompt: optionalString(root.systemPrompt, 'systemPrompt') ?? '',
     tools,
+    ...(plugins === undefined ? {} : { plugins }),
     scopes,
     limits,
     sandbox,
@@ -318,7 +344,13 @@ export async function loadDefinition(
   options: LoadDefinitionOptions = {},
 ): Promise<EmbeddedAgentDefinition> {
   const { raw, fallbackId } = await readDefinitionFile(file);
-  return normalizeDefinition(raw, fallbackId, options);
+  return resolvePlugins(normalizeDefinition(raw, fallbackId, options), file);
+}
+
+/** 定义文件里的插件路径相对定义文件解析，与插件自己的 cwd 无关。 */
+function resolvePlugins(definition: EmbeddedAgentDefinition, file: string): EmbeddedAgentDefinition {
+  const plugins = resolvePluginPaths(definition.plugins, dirname(file));
+  return plugins === undefined ? definition : { ...definition, plugins };
 }
 
 export type PlatformSourceConfig = {
@@ -347,14 +379,21 @@ export type LoadedAgentFile = {
  * 聊天默认 `completion: text`：文件里没写时才覆盖；写了就尊重文件。
  * sessionIsolation 强制 inline，交互流式不能进子进程。
  */
-export async function loadAgentFile(file: string): Promise<LoadedAgentFile> {
+export async function loadAgentFile(
+  file: string,
+  options: LoadDefinitionOptions = {},
+): Promise<LoadedAgentFile> {
   const { raw, fallbackId } = await readDefinitionFile(file);
   const root = record(raw, '定义');
   const definition = normalizeDefinition(raw, fallbackId, {
     ...(root.completion === undefined ? { completion: 'text' as CompletionPolicy } : {}),
+    ...options,
   });
   definition.sessionIsolation = 'inline';
-  return { definition, sources: parseChatSources(root.sources, definition.id) };
+  return {
+    definition: resolvePlugins(definition, file),
+    sources: parseChatSources(root.sources, definition.id),
+  };
 }
 
 function parseChatSources(raw: unknown, agentId: string): ChatSourcesConfig {

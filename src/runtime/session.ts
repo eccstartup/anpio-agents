@@ -11,8 +11,10 @@ import type { MailEnvelope } from '../client.ts';
 import type { CompletionPolicy, EmbeddedAgentDefinition } from '../definition.ts';
 import { createRunDir, keepRunDir, removeRunDir, scrubbedEnv } from '../sandbox.ts';
 import { createTools } from '../tools.ts';
+import { declaredPluginTools } from '../plugins/naming.ts';
+import { withPlugins } from '../plugins/tools.ts';
 import type { AgentRuntime } from './agent.ts';
-import { runBrainLoop } from './brain-loop.ts';
+import { runBrainLoop, type BrainLoopTools } from './brain-loop.ts';
 import { createRunLog, type RunLog, type RunLogger } from './log.ts';
 import { envelopeText, systemPromptFor, writeAgentsFile } from './prompt.ts';
 import type { AgentTransport } from './transport.ts';
@@ -86,12 +88,18 @@ export class AgentSession {
     const runDir = await createRunDir(this.runtime.agentId, runId, this.runtime.rootBase);
     this.workdir = runDir;
     this.runtime.sessionBegin();
-    await writeAgentsFile(runDir, definition, this.runtime.tools, this.transport.environment);
+    await writeAgentsFile(
+      runDir,
+      definition,
+      [...this.runtime.tools, ...declaredPluginTools(definition.plugins).map((tool) => tool.exposedName)],
+      this.transport.environment,
+    );
     this.log('info', `运行开始：${definition.name}（${definition.provider.id}/${definition.provider.model}），目录 ${runDir}`);
     this.log('debug', `子进程环境只有 ${Object.keys(scrubbedEnv(runDir)).join(', ')}`);
 
     const pulled = this.pulled;
     let finished: { summary: string; outcome: string } | null = null;
+    let tools: BrainLoopTools | null = null;
 
     const heartbeat = async () => {
       try {
@@ -147,14 +155,38 @@ export class AgentSession {
       }
 
       const brain = this.runtime.brainForSession();
-      const tools = createTools({
-        backend: this.transport.tools,
-        runDir,
-        runId,
-        definition,
-        tools: this.runtime.tools,
-        log: this.log,
-      });
+      const taskId = pulled.find((item) => item.ref.taskId)?.ref.taskId ?? undefined;
+      const preparation = await this.runtime.preparePlugins(this.log);
+      for (const item of preparation.degraded) {
+        this.log('warn', `插件 ${item.id} 不可用，按 optional 降级：${item.reason}`);
+      }
+      tools = withPlugins(
+        createTools({
+          backend: this.transport.tools,
+          runDir,
+          runId,
+          definition,
+          tools: this.runtime.tools,
+          log: this.log,
+        }),
+        this.runtime.plugins,
+        {
+          runId,
+          agentId: this.runtime.agentId,
+          turnId: runId,
+          ...(taskId === undefined ? {} : { taskId }),
+          signal: this.deadline.signal,
+          log: this.log,
+          onProgress: (progress) => {
+            this.log(
+              'info',
+              `插件 ${progress.pluginId} ${progress.tool} 进度 ${progress.progress}${
+                progress.total === undefined ? '' : `/${progress.total}`
+              }${progress.message === undefined ? '' : `：${progress.message}`}`,
+            );
+          },
+        },
+      );
       const messages: ChatMessage[] = [
         ...this.history,
         { role: 'user', content: parts.join('\n\n---\n\n') },
@@ -258,6 +290,13 @@ export class AgentSession {
           ? (this.toolExecuted ? 3600 : 300)
           : 300;
         await this.releaseMessages(this.pulled, retryAfterSeconds, reason);
+      }
+      if (tools?.dispose) {
+        try {
+          await tools.dispose();
+        } catch {
+          // 容器或插件收尾失败不影响这一轮的结论。
+        }
       }
       if (this.mailSessionId) {
         try {

@@ -34,6 +34,7 @@ description: provider、tools、limits、sources、scopes 与 anp 字段，以�
 | `provider` | object | 必填 | 模型协议与鉴权，见下 |
 | `systemPrompt` | string | 空 | 系统提示，支持环境变量占位 |
 | `tools` | string[] | 读文件、写文件、列目录、finish | 工具白名单 |
+| `plugins` | object[] | 无 | 外部 MCP 插件，见[外部插件](/guide/plugins) |
 | `scopes` | string[] | `[]` | 平台授权范围 |
 | `limits` | object | 见下 | 轮次、超时与 token 上限 |
 | `sandbox` | object | 见下 | shell 开关与输出限制 |
@@ -125,6 +126,8 @@ description: provider、tools、limits、sources、scopes 与 anp 字段，以�
 
 **router 工具**（ANP router 提供）：`anp_send`、`anp_reply`、`anp_list_messages`、`anp_get_message`、`list_agents`、`agent_status`、`spawn_agent`、`schedule_create`、`schedule_cancel`、`list_schedules`、`http_fetch`、`memory_get`、`memory_set`、`finish_turn`。
 
+**插件工具**（`plugins` 里的 MCP server 提供）：名字形如 `plugin__<id>__<tool>`，只暴露每个插件 `allow` 里的工具。`tools` 数组只接受内置工具；插件工具写在 `plugins[].allow`，不是 `tools`。字段与接入方式见[外部插件](/guide/plugins)。
+
 自运行时声明了平台工具会启动报错；`--allow-missing-tools` 可以降级为只用本地原语。
 
 ## sources
@@ -187,6 +190,7 @@ description: provider、tools、limits、sources、scopes 与 anp 字段，以�
 | `examples/local-chat.json` | 聊天式定义，`completion` 由聊天 CLI 补成 `text` |
 | `examples/local-assistant.json` | 一次性运行助手，`completion: text` |
 | `examples/local-deepseek.json` | OpenAI 兼容供应商，覆盖 `baseUrl` |
+| `examples/local-plugin.json` | script 协议调用本地 MCP 插件（模板在 `examples/plugins/ci-logs/`） |
 | `examples/agents.json` | 平台同步用的多定义文件 |
 | `examples/anp/router.local.json` | ANP router 配置与两个脚本 agent |
 
@@ -198,6 +202,7 @@ description: provider、tools、limits、sources、scopes 与 anp 字段，以�
 - 协议未知，或协议不能独立多轮运行。
 - 非 `script` 协议缺 `model`，或需要 `baseUrl` 却没有。
 - 工具名不在已知集合里。
+- `plugins` 字段非法：id 不合法或重复、`allow` 为空、`env` 写成 `KEY=value`、`transport` 不是 `stdio`、工具清洗后重名。
 - `tools` 含 `shell` 但 `sandbox.shell` 为 `false`。
 - 声明了 `apiKeyEnv`，但既没有 `apiKey` / `apiKeyFile`，环境里也没有这个变量。
 - `sources.platform` 写了明文凭据。

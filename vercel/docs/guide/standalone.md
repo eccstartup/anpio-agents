@@ -194,6 +194,6 @@ anpio-agents --agent agent-runs/local-router.json
 
 **HTTP 401**：平台或代理需要令牌。检查 `apiKeyFile` 内容、`apiKeyEnv` 对应的变量，以及服务模式的 `AGENT_HTTP_TOKEN`。
 
-**定义里的工具启动即报错**：自运行没有平台工具后端。去掉平台工具，或加 `--allow-missing-tools` 降级；插件与外部能力会在后续版本提供。
+**定义里的工具启动即报错**：自运行没有平台工具后端。去掉平台工具，或加 `--allow-missing-tools` 降级。外部能力走 `plugins`（MCP server），见[外部插件](/guide/plugins)。
 
 **修改没有被平台看到**：自运行的定义文件只在本机生效，不会同步到 `anpio-collab`。

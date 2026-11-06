@@ -53,8 +53,8 @@ http / 定时  ─┘      │             │                        ├─ 本
 | [自运行](/guide/standalone) | 交互式对话、一次性运行、HTTP 常驻服务、密钥与数据目录 |
 | [Collab 调用](/guide/collab) | supervisor、平台来源、ANP router、消息确认与上线清单 |
 | [定义文件](/guide/definition) | 字段参考、协议、工具、来源与校验规则 |
-| [外部插件（规划）](/guide/plugins) | 把日志、监控和流水线环节作为工具接入 |
+| [外部插件](/guide/plugins) | 用 MCP server 把日志、监控和流水线环节作为工具接入 |
 
-::: tip 下一步
-计划把外部系统作为插件接入智能体（读执行日志、查监控、触发某个流水线环节）。设计还在评审，摘要见 [外部插件](/guide/plugins)，完整计划在仓库的 [`docs/plugin-plan.md`](https://github.com/eccstartup/anpio-agents/blob/main/docs/plugin-plan.md)。
+::: tip 接入外部系统
+外部系统以 **MCP server** 的形式接入：在定义里声明 `plugins`，引擎启动它、发现工具，模型就能调用 `plugin__<id>__<tool>`。stdio 传输已可用（协议层用官方 SDK），HTTP 与平台侧审批属于后续阶段。接入步骤见 [外部插件](/guide/plugins)，完整计划在仓库的 [`docs/plugin-plan.md`](https://github.com/eccstartup/anpio-agents/blob/main/docs/plugin-plan.md)。
 :::

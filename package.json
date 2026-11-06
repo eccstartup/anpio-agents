@@ -14,13 +14,16 @@
     "standalone": "node --disable-warning=ExperimentalWarning src/standalone.ts",
     "router": "node --disable-warning=ExperimentalWarning src/router/main.ts",
     "anp:send": "node --disable-warning=ExperimentalWarning src/anp/send-cli.ts",
+    "plugin:check": "node --disable-warning=ExperimentalWarning src/plugins/check-cli.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "agents": "node --disable-warning=ExperimentalWarning --use-system-ca src/chat/cli.ts"
   },
   "dependencies": {
     "@anpio-cli/core": "file:../anpio-cli/packages/core",
-    "@anpio-cli/service": "file:../anpio-cli/packages/service"
+    "@anpio-cli/service": "file:../anpio-cli/packages/service",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
   },
   "overrides": {
     "@anpio-cli/core": "file:../anpio-cli/packages/core"
