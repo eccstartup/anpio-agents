@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const entry = fileURLToPath(new URL('../src/chat/cli.ts', import.meta.url));
 const child = spawn(
   process.execPath,
-  ['--disable-warning=ExperimentalWarning', entry, ...process.argv.slice(2)],
+  ['--disable-warning=ExperimentalWarning', '--use-system-ca', entry, ...process.argv.slice(2)],
   { stdio: 'inherit' },
 );
 

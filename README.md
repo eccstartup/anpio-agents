@@ -168,7 +168,7 @@ DEEPSEEK_API_KEY=... npm run standalone -- --agent examples/local-deepseek.json 
 echo '{"text":"继续处理","threadId":"thread-1"}' | npm run standalone -- --agent examples/local-assistant.json
 ```
 
-- 定义文件由 `src/standalone/config.ts` 补齐 id、时间戳、`concurrency: 1`、`sessionIsolation: "inline"` 与限额；非 `script` 协议会补常见 `baseUrl`，缺 `apiKeyEnv` 指向的环境变量时启动即报错。
+- 定义文件由 `src/standalone/config.ts` 补齐 id、时间戳、`concurrency: 1`、`sessionIsolation: "inline"` 与限额；非 `script` 协议会补常见 `baseUrl`。密钥默认从 `apiKeyEnv` 指向的环境变量读，缺变量时启动即报错；本地定义也可写 `provider.apiKeyFile`（指向密钥文件）或 `provider.apiKey`（明文，仅在本地使用）。
 - 其他 OpenAI 兼容供应商（DeepSeek、Moonshot、通义等）用 `protocol: "openai-chat"`，把 `provider.baseUrl` 指向对方的 `/v1` 地址并改 `model` 即可，见 `examples/local-deepseek.json`。
 - 同一个 `threadId` 的后续运行会自动带上前几轮历史（只存「用户输入 + 最终回答」），历史落在 `<root>/.local/conversations/`；超过 `AGENT_HISTORY_MAX_MESSAGES` / `AGENT_HISTORY_MAX_BYTES` 时从最旧的成对消息开始淘汰。失败的一轮不写入历史。
 - 定义里写 `sessionIsolation: "process"` 时，每次运行在独立子进程里执行（入口仍是 `src/session.ts`），父进程只负责并发、超时与结果收集；`history` 会一并传进子进程。
@@ -470,4 +470,6 @@ npm run check
 - [ANP 常驻运行时方案](docs/anp-runtime-plan.md)：多 agent router、身份与 DID、长期 session、调度、子 agent 与容器隔离
 - [独立运行方案](docs/standalone-plan.md)：把控制面抽成端口，让同一个执行引擎可以脱离 anpio-collab 单独运行，并为任意触发/工具接口预留扩展点
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
+- [外部插件方案](docs/plugin-plan.md)：把流水线日志、监控与环节执行作为插件接入（提议）
+- [文档站](vercel/README.md)：基于 Vite 的自运行 / Collab 使用文档，可部署到 Vercel
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议

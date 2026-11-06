@@ -1,9 +1,13 @@
 /**
- * 按协议选择适配器，并在这里统一解析密钥环境变量。
+ * 按协议选择适配器，并在这里统一解析密钥。
  *
- * 密钥只从进程环境读；定义里存的是变量名，数据库里没有任何明文密钥。
+ * 优先用本地定义里的 apiKey / apiKeyFile；否则读 apiKeyEnv 指向的环境变量。
+ * 平台路径只给变量名，不会下发明文密钥。
  */
 
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { EmbeddedProviderConfig } from '../definition.ts';
 import { anthropicBrain } from './anthropic.ts';
 import { decisionBrain } from './decision.ts';
@@ -23,8 +27,12 @@ function configOf(provider: EmbeddedProviderConfig, options: BrainOptions): { co
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? (globalThis.fetch as FetchLike);
   if (!fetchImpl) throw new Error('当前 Node 版本没有 fetch');
-  let apiKey: string | null = null;
-  if (provider.apiKeyEnv) {
+  let apiKey: string | null = provider.apiKey?.trim() || null;
+  if (!apiKey && provider.apiKeyFile) {
+    apiKey = readFileSync(expandHome(provider.apiKeyFile), 'utf8').trim() || null;
+    if (!apiKey) throw new Error(`密钥文件是空的：${provider.apiKeyFile}`);
+  }
+  if (!apiKey && provider.apiKeyEnv) {
     apiKey = env[provider.apiKeyEnv] ?? null;
     if (!apiKey) throw new Error(`缺少环境变量 ${provider.apiKeyEnv}（密钥只从环境变量读取）`);
   }
@@ -83,4 +91,10 @@ export function resolveDecision(
   const { config, fetchImpl } = configOf(provider, options);
   if (provider.protocol !== 'decision-jev') throw new Error('这个供应商不是决策协议');
   return decisionBrain(config, fetchImpl);
+}
+
+function expandHome(path: string): string {
+  if (path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  return path;
 }

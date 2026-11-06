@@ -118,6 +118,9 @@ export type EmbeddedProviderConfig = {
   baseUrl: string;
   model: string;
   apiKeyEnv: string | null;
+  /** 仅本地定义文件：直接写密钥或指向密钥文件；平台路径仍然只用 apiKeyEnv。 */
+  apiKey?: string;
+  apiKeyFile?: string;
   /** 只给 script 协议用：每一步要么说一句话，要么调一个工具。 */
   script?: ScriptStep[];
 };

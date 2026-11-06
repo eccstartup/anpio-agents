@@ -198,6 +198,8 @@ function parseProvider(raw: unknown, providerIdFallback: string): EmbeddedProvid
     const explicit = optionalString(provider.apiKeyEnv, 'provider.apiKeyEnv');
     apiKeyEnv = explicit ?? DEFAULT_KEY_ENV[protocol] ?? null;
   }
+  const apiKey = optionalString(provider.apiKey, 'provider.apiKey');
+  const apiKeyFile = optionalString(provider.apiKeyFile, 'provider.apiKeyFile');
 
   const script =
     protocol === 'script'
@@ -212,6 +214,8 @@ function parseProvider(raw: unknown, providerIdFallback: string): EmbeddedProvid
     baseUrl,
     model,
     apiKeyEnv,
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(apiKeyFile === undefined ? {} : { apiKeyFile }),
     ...(script === undefined ? {} : { script }),
   };
 }
@@ -302,7 +306,7 @@ export function normalizeDefinition(
     lastError: null,
   };
 
-  if (provider.apiKeyEnv && !process.env[provider.apiKeyEnv]) {
+  if (provider.apiKeyEnv && !provider.apiKey && !provider.apiKeyFile && !process.env[provider.apiKeyEnv]) {
     fail('provider.apiKeyEnv', `缺少环境变量 ${provider.apiKeyEnv}（密钥只从环境变量读取）`);
   }
 
