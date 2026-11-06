@@ -475,6 +475,6 @@ npm run check
 - [独立运行方案](docs/standalone-plan.md)：把控制面抽成端口，让同一个执行引擎可以脱离 anpio-collab 单独运行，并为任意触发/工具接口预留扩展点
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
 - [外部插件方案](docs/plugin-plan.md)：把流水线日志、监控与环节执行作为 MCP 插件接入（阶段 1/2 已实施）
-- [智能体记忆方案](docs/memory-plan.md)：长期记忆的条目化存储、轮末写入、提示词注入与整理任务（设计）
+- [会话、记忆与经验](docs/memory-plan.md)：会话事件日志、分级记忆、平台经验候选与审核、上下文装配（设计）
 - [文档站](vercel/README.md)：基于 VitePress 的自运行 / Collab 使用文档，可部署到 Vercel
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议
