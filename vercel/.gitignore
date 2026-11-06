@@ -1,4 +1,4 @@
-node_modules/
-dist/
-.vercel/
-*.log
+node_modules
+docs/.vitepress/cache
+docs/.vitepress/dist
+.vercel

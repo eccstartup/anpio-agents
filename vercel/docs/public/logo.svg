@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Anpio Agents">
+  <defs>
+    <linearGradient id="g" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1c8a6d"/>
+      <stop offset="1" stop-color="#0e4d3e"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#g)"/>
+  <circle cx="21" cy="24" r="5" fill="#e8f3ee"/>
+  <circle cx="43" cy="24" r="5" fill="#e8f3ee"/>
+  <circle cx="32" cy="43" r="5" fill="#e8f3ee"/>
+  <path d="M25.5 25.5 28.8 39M38.5 25.5 35.2 39M26 24h12" stroke="#e8f3ee" stroke-width="3" stroke-linecap="round" fill="none"/>
+</svg>

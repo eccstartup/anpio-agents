@@ -1,14 +1,14 @@
 {
   "name": "anpio-agents-docs",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
+  "description": "Anpio Agents 文档站",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "vitepress dev docs",
+    "build": "vitepress build docs",
+    "preview": "vitepress preview docs"
   },
   "devDependencies": {
-    "vite": "^8.3.6"
+    "vitepress": "^1.6.4"
   }
 }

@@ -1,6 +1,13 @@
-# 外部插件（规划中）
+---
+title: 外部插件（规划）
+description: 用 MCP 把流水线日志、监控与环节执行接入智能体；方案设计，尚未实现。
+---
 
-> 状态：方案设计中，尚未实现。本页描述目标与设计方向，完整计划在仓库的 `docs/plugin-plan.md`。
+# 外部插件（规划）
+
+::: warning 状态：方案设计中，尚未实现
+本页描述目标与设计方向。完整计划与实施阶段见仓库的 [`docs/plugin-plan.md`](https://github.com/eccstartup/anpio-agents/blob/main/docs/plugin-plan.md)。
+:::
 
 ## 要解决的问题
 

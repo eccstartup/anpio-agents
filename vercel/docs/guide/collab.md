@@ -1,3 +1,8 @@
+---
+title: Collab 调用
+description: 把控制面交给 anpio-collab：supervisor、平台消息来源与 ANP router。
+---
+
 # Collab 调用：接入 anpio-collab
 
 Collab 调用把控制面交给 `anpio-collab`：平台保存定义、创建运行、投递消息、记录日志与结果。执行引擎仍然在运行它的机器上，模型密钥也只在那边。
@@ -12,7 +17,9 @@ Collab 调用把控制面交给 `anpio-collab`：平台保存定义、创建运�
 | 平台消息来源（`anpio-agents` + `sources.platform`） | 平台信箱 | 常驻对话智能体，同时接收平台任务 |
 | ANP router（`npm run router`） | ANP 消息 / 管理接口 / 定时任务 | 多个 agent 在同一进程内互相派活、长期 thread |
 
+::: warning 不要重复订阅
 同一个平台 agent 不要同时用 supervisor 和 `anpio-agents` 订阅消息，否则两边会抢消息、重复执行。
+:::
 
 ## 1. supervisor
 

@@ -1,6 +1,11 @@
-# anpio-agents 文档
+---
+title: 总览
+description: anpio-agents 的三层结构、两种运行方式，以及该从哪篇文档开始。
+---
 
-`anpio-agents` 是 ANPIO 的智能体执行引擎。给定一份定义文件和一个模型，它就能在受控目录里读写文件、执行 shell、调用平台工具，并把多轮对话按 thread 串起来。
+# 总览
+
+`anpio-agents` 是 ANPIO 的智能体执行引擎。给定一份定义文件和一个模型，它就能在受控目录里读写文件、执行 shell、调用工具，并把多轮对话按 thread 串起来。
 
 **同一个引擎，两种接入方式**：不连平台时自己跑；连上 `anpio-collab` 后，由平台下发定义、投递消息、记录运行。
 
@@ -36,18 +41,20 @@ http / 定时  ─┘      │             │                        ├─ 本
 
 ## 怎么选
 
-- **只在本机试用、写脚本、或者把智能体挂到一条单机流水线上**：从 [自运行](standalone.md) 开始。
-- **需要平台建运行、分配任务、保留审计、和外部 Agent 协作**：读 [Collab 调用](collab.md)。
+- **只在本机试用、写脚本、或者把智能体挂到一条单机流水线上**：从 [自运行](/guide/standalone) 开始。
+- **需要平台建运行、分配任务、保留审计、和外部 Agent 协作**：读 [Collab 调用](/guide/collab)。
 - **既想在终端聊天，又想接收平台任务**：用 `anpio-agents`，并在定义里启用 `sources.platform`。平台只是消息来源之一，不需要为它单独写一套 Session。
-- **多个 agent 互相发消息、派活、定时触发**：用 ANP router 常驻进程，见 [Collab 调用](collab.md)。
+- **多个 agent 互相发消息、派活、定时触发**：用 ANP router 常驻进程，见 [Collab 调用](/guide/collab)。
 
 ## 接下来
 
 | 文档 | 内容 |
 | --- | --- |
-| [自运行](standalone.md) | 交互式对话、一次性运行、HTTP 常驻服务、密钥与数据目录 |
-| [Collab 调用](collab.md) | supervisor、平台来源、ANP router、消息确认与上线清单 |
-| [定义文件](definition.md) | 字段参考、协议、工具、来源与校验规则 |
-| [外部插件（规划）](plugins.md) | 把日志、监控和流水线环节作为工具接入 |
+| [自运行](/guide/standalone) | 交互式对话、一次性运行、HTTP 常驻服务、密钥与数据目录 |
+| [Collab 调用](/guide/collab) | supervisor、平台来源、ANP router、消息确认与上线清单 |
+| [定义文件](/guide/definition) | 字段参考、协议、工具、来源与校验规则 |
+| [外部插件（规划）](/guide/plugins) | 把日志、监控和流水线环节作为工具接入 |
 
-> 计划把外部系统作为插件接入智能体（读执行日志、查监控、触发某个流水线环节）。当前设计还在评审，方案摘要见 [外部插件](plugins.md)，完整计划在仓库的 `docs/plugin-plan.md`。
+::: tip 下一步
+计划把外部系统作为插件接入智能体（读执行日志、查监控、触发某个流水线环节）。设计还在评审，摘要见 [外部插件](/guide/plugins)，完整计划在仓库的 [`docs/plugin-plan.md`](https://github.com/eccstartup/anpio-agents/blob/main/docs/plugin-plan.md)。
+:::

@@ -1,6 +1,6 @@
 # anpio-agents 文档站
 
-基于 Vite 的静态文档站，部署到 Vercel。文档内容在 `public/docs/`，用 Markdown 编写；站点只负责导航、渲染与样式。
+基于 VitePress 的静态文档站，和 [anpio-collab 文档站](https://github.com/eccstartup/anpio-collab/tree/master/vercel) 使用同一套主题与配置风格，部署到 Vercel。
 
 覆盖两种使用场景：
 
@@ -26,11 +26,11 @@ npm run build
 npm run preview
 ```
 
-产物在 `vercel/dist/`。
+产物在 `vercel/docs/.vitepress/dist/`。
 
 ## 部署到 Vercel
 
-在 Vercel 新建项目，选择本仓库，把 **Root Directory** 设为 `vercel`。框架会被识别为 Vite，构建命令 `npm run build`，输出目录 `dist`。
+在 Vercel 新建项目，选择本仓库，把 **Root Directory** 设为 `vercel`。框架会被识别为 VitePress，构建命令 `npm run build`，输出目录 `docs/.vitepress/dist`。
 
 也可以用 Vercel CLI：
 
@@ -42,22 +42,25 @@ npx vercel --prod
 
 ## 加一篇文档
 
-1. 新建 `public/docs/<name>.md`。
-2. 在 `src/main.ts` 的 `DOCS` 数组里加一项：`id`（URL hash）、`title`、`file`、`group`、`summary`。
-3. 重新构建。
+1. 新建 `docs/guide/<name>.md`，开头写 `title` 与 `description`。
+2. 在 `docs/.vitepress/config.mts` 的 `themeConfig.sidebar` 里加一项。
+3. 需要的话同步 `themeConfig.nav` 与首页的“文档地图”。
 
-路由用 URL hash，例如 `#/standalone`，不需要服务端 rewrite。
+路由由文件路径决定，`cleanUrls` 打开后访问 `/guide/<name>`。
 
 ## 目录
 
 ```text
 vercel/
-├─ index.html
-├─ vite.config.ts
 ├─ vercel.json
-├─ public/docs/       Markdown 文档
-└─ src/
-   ├─ main.ts         导航、路由、目录与复制按钮
-   ├─ markdown.ts     轻量 Markdown 渲染
-   └─ style.css       样式
+├─ tsconfig.json
+└─ docs/
+   ├─ index.md                 首页（hero + features）
+   ├─ public/                  logo 与 robots.txt
+   ├─ guide/                   总览、自运行、Collab、定义、插件
+   └─ .vitepress/
+      ├─ config.mts            导航、侧边栏、搜索与页脚
+      └─ theme/
+         ├─ index.ts
+         └─ custom.css         品牌色与文档样式
 ```

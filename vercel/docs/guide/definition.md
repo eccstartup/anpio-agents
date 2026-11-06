@@ -1,3 +1,8 @@
+---
+title: 定义文件
+description: provider、tools、limits、sources、scopes 与 anp 字段，以及加载时的校验规则。
+---
+
 # 定义文件参考
 
 一份定义文件描述三件事：**用哪个模型**、**能用哪些工具**、**一次运行有什么边界**。自运行从文件加载；Collab 路径由平台下发同一套结构。

@@ -1,8 +1,13 @@
+---
+title: 自运行
+description: 不连平台：交互式对话、一次性运行、HTTP 常驻服务、密钥解析与数据目录。
+---
+
 # 自运行：不连平台
 
 自运行只依赖一份定义文件。控制面被换成本地实现：信箱、运行记录与在线状态落在 `<root>/.local/`，不访问 `anpio-collab`。
 
-适合本地试用、把智能体嵌入脚本、或在流水线节点上执行一次任务。
+适合本地试用、把智能体嵌入脚本，或在流水线节点上执行一次任务。
 
 ## 前提
 
@@ -165,7 +170,9 @@ chmod 600 ~/.anpio-cc-router-token
 anpio-agents --agent agent-runs/local-router.json
 ```
 
+::: tip 自签 CA
 本机代理使用自签 CA 时，Node 需要信任系统证书：仓库里的 `bin/anpio-agents.mjs` 和 `npm run agents` 已经带上 `--use-system-ca`。直接运行 `node src/chat/cli.ts` 时需要自己加。
+:::
 
 ## 数据目录
 

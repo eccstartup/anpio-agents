@@ -471,5 +471,5 @@ npm run check
 - [独立运行方案](docs/standalone-plan.md)：把控制面抽成端口，让同一个执行引擎可以脱离 anpio-collab 单独运行，并为任意触发/工具接口预留扩展点
 - [平台内嵌 Agent](https://github.com/eccstartup/anpio-collab/blob/master/vercel/docs/guide/embedded-agent.md)：定义字段、管理接口、身份与授权
 - [外部插件方案](docs/plugin-plan.md)：把流水线日志、监控与环节执行作为插件接入（提议）
-- [文档站](vercel/README.md)：基于 Vite 的自运行 / Collab 使用文档，可部署到 Vercel
+- [文档站](vercel/README.md)：基于 VitePress 的自运行 / Collab 使用文档，可部署到 Vercel
 - [anpio-collab](https://github.com/eccstartup/anpio-collab)：控制面与协作协议
